@@ -1,0 +1,60 @@
+experiment:
+  name: pointmae_rae_completion_baseline
+  seed: 42
+  device: cuda
+
+dataset:
+  name: paired_completion_dataset
+  train_split: train
+  val_split: val
+  num_input_points: 768
+  num_output_points: 2048
+  normalize: true
+  partial_mode: random_crop
+
+encoder:
+  type: pointmae_frozen
+  source_repo: /root/autodl-tmp/projects/Point-MAE
+  checkpoint: /root/autodl-tmp/projects/Point-MAE/checkpoint/pretrain.pth
+  freeze: true
+  group_size: 32
+  num_group: 64
+  trans_dim: 384
+  encoder_dims: 384
+  depth: 12
+  num_heads: 6
+  drop_path_rate: 0.1
+
+latent:
+  normalize: true
+  stats_path: null
+  noise_tau: 0.1
+
+decoder:
+  type: query_completion_decoder
+  num_queries: 256
+  hidden_dim: 384
+  depth: 6
+  num_heads: 6
+  mlp_ratio: 4.0
+  output_points: 2048
+
+loss:
+  chamfer: l1
+  repulsion_weight: 0.0
+  partial_preserve_weight: 0.0
+
+training:
+  batch_size: 16
+  epochs: 300
+  optimizer: adamw
+  lr: 0.0005
+  weight_decay: 0.05
+  clip_grad: 1.0
+  ema_decay: 0.999
+
+evaluation:
+  metrics:
+    - cd_l1
+    - cd_l2
+    - f_score
