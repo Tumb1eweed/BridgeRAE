@@ -20,3 +20,4 @@ venv/
 
 /tmp/
 tmp_*.py
+.vscode/
