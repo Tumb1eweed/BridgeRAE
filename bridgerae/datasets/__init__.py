@@ -1,10 +1,11 @@
-from .epn_point import EPNPointCloudDataset, EPNPointCloudSample, epn_point_collate_fn
-from .epn_voxel import EPNVoxelDataset, EPNVoxelSample
+from .shapenet_pairs import (
+    ShapeNetPointCloudDataset,
+    ShapeNetPointCloudSample,
+    shapenet_point_collate_fn,
+)
 
 __all__ = [
-    "EPNVoxelDataset",
-    "EPNVoxelSample",
-    "EPNPointCloudDataset",
-    "EPNPointCloudSample",
-    "epn_point_collate_fn",
+    'ShapeNetPointCloudDataset',
+    'ShapeNetPointCloudSample',
+    'shapenet_point_collate_fn',
 ]

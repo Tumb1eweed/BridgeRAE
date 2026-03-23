@@ -8,6 +8,14 @@ import torch
 from .losses import chamfer_distance_l1, chamfer_distance_l2
 
 
+def _uniform_subsample(points: torch.Tensor, num_points: int | None) -> torch.Tensor:
+    if num_points is None or points.shape[1] <= num_points:
+        return points
+    idx = torch.linspace(0, points.shape[1] - 1, steps=num_points, device=points.device)
+    idx = idx.round().long()
+    return points.index_select(1, idx)
+
+
 _EMD_IMPORT_OK = False
 _EMD_IMPORT_ERROR: Exception | None = None
 _POINTMAE_EMD_PATH = Path('/root/autodl-tmp/projects/Point-MAE/extensions/emd')
@@ -49,11 +57,18 @@ def voxel_iou_metric(pred: torch.Tensor, target: torch.Tensor, resolution: int =
 
 
 @torch.no_grad()
-def compute_completion_metrics(pred: torch.Tensor, target: torch.Tensor, iou_resolution: int = 32) -> dict[str, float]:
-    cd_l2 = float(chamfer_distance_metric(pred, target).item()) * 100.0
-    cd_l1 = float(chamfer_distance_l1_metric(pred, target).item())
-    emd = float(earth_mover_distance_metric(pred, target).item())
-    iou = float(voxel_iou_metric(pred, target, resolution=iou_resolution).item()) * 100.0
+def compute_completion_metrics(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    iou_resolution: int = 32,
+    metric_points: int | None = 2048,
+) -> dict[str, float]:
+    pred_eval = _uniform_subsample(pred, metric_points)
+    target_eval = _uniform_subsample(target, metric_points)
+    cd_l2 = float(chamfer_distance_metric(pred_eval, target_eval).item()) * 100.0
+    cd_l1 = float(chamfer_distance_l1_metric(pred_eval, target_eval).item())
+    emd = float(earth_mover_distance_metric(pred_eval, target_eval).item())
+    iou = float(voxel_iou_metric(pred_eval, target_eval, resolution=iou_resolution).item()) * 100.0
     return {
         'chamfer_distance': cd_l2,
         'chamfer_distance_l1': cd_l1,

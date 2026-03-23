@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from bridgerae.datasets import EPNPointCloudDataset, epn_point_collate_fn
+from bridgerae.datasets import ShapeNetPointCloudDataset, shapenet_point_collate_fn
 from bridgerae.models import PointMAEEncoder, QueryCompletionDecoder
 from bridgerae.training.losses import chamfer_distance_l2
 from bridgerae.training.metrics import compute_completion_metrics
@@ -15,9 +15,9 @@ from bridgerae.training.metrics import compute_completion_metrics
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='BridgeRAE stage-1 evaluate all checkpoints')
-    parser.add_argument('--data-root', type=Path, default=Path('/root/autodl-tmp/projects/DiffComplete/data/3d_epn'))
+    parser.add_argument('--data-root', type=Path, default=Path('/root/autodl-tmp/datasets/ShapeNet55_PoinTrPairs'))
     parser.add_argument('--ckpt-dir', type=Path, required=True)
-    parser.add_argument('--class-id', type=str, default='03001627')
+    parser.add_argument('--class-id', type=str, default=None)
     parser.add_argument('--split', type=str, default='test', choices=['train', 'test'])
     parser.add_argument('--batch-size', type=int, default=128)
     parser.add_argument('--num-workers', type=int, default=8)
@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
 
 def load_decoder_state(checkpoint_path: Path, device: torch.device) -> tuple[QueryCompletionDecoder, dict]:
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
-    decoder = QueryCompletionDecoder(hidden_dim=384, num_queries=256, num_heads=6, depth=6, output_points=2048).to(device)
+    decoder = QueryCompletionDecoder(hidden_dim=384, num_queries=256, num_heads=6, depth=6, output_points=8192).to(device)
     decoder.load_state_dict(checkpoint['decoder'])
     decoder.eval()
     return decoder, checkpoint
@@ -88,20 +88,19 @@ def main() -> None:
         raise RuntimeError('CUDA is required for stage1_eval_all.py')
 
     device = torch.device('cuda')
-    dataset = EPNPointCloudDataset(
+    dataset = ShapeNetPointCloudDataset(
         data_root=args.data_root,
         split=args.split,
         class_id=args.class_id,
-        per_class=True,
-        num_input_points=768,
-        num_complete_points=2048,
+        num_input_points=2048,
+        num_complete_points=8192,
     )
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        collate_fn=epn_point_collate_fn,
+        collate_fn=shapenet_point_collate_fn,
         pin_memory=True,
         drop_last=False,
         persistent_workers=args.num_workers > 0,

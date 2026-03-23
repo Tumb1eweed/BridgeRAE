@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from bridgerae.datasets import EPNPointCloudDataset, epn_point_collate_fn
+from bridgerae.datasets import ShapeNetPointCloudDataset, shapenet_point_collate_fn
 from bridgerae.models import LatentTransportModel, PointMAEEncoder, QueryCompletionDecoder
 from bridgerae.training.losses import chamfer_distance_l2
 from bridgerae.training.metrics import compute_completion_metrics
@@ -15,8 +15,8 @@ from bridgerae.training.metrics import compute_completion_metrics
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='BridgeRAE stage-2 latent transport evaluation')
-    parser.add_argument('--data-root', type=Path, default=Path('/root/autodl-tmp/projects/DiffComplete/data/3d_epn'))
-    parser.add_argument('--class-id', type=str, default='03001627')
+    parser.add_argument('--data-root', type=Path, default=Path('/root/autodl-tmp/datasets/ShapeNet55_PoinTrPairs'))
+    parser.add_argument('--class-id', type=str, default=None)
     parser.add_argument('--stage2-ckpt', type=Path, required=True)
     parser.add_argument('--stage1-ckpt', type=Path, required=True)
     parser.add_argument('--encoder-ckpt', type=Path, default=Path('/root/autodl-tmp/projects/Point-MAE/checkpoint/pretrain.pth'))
@@ -26,12 +26,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--transport-steps', type=int, default=8)
     parser.add_argument('--max-batches', type=int, default=None)
     parser.add_argument('--iou-resolution', type=int, default=32)
+    parser.add_argument('--metric-points', type=int, default=2048)
     return parser.parse_args()
 
 
 def load_stage1_decoder(checkpoint_path: Path, device: torch.device) -> QueryCompletionDecoder:
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
-    decoder = QueryCompletionDecoder(hidden_dim=384, num_queries=256, num_heads=6, depth=6, output_points=2048).to(device)
+    decoder = QueryCompletionDecoder(hidden_dim=384, num_queries=256, num_heads=6, depth=6, output_points=8192).to(device)
     decoder.load_state_dict(checkpoint['decoder'])
     decoder.eval()
     return decoder
@@ -51,20 +52,19 @@ def main() -> None:
         raise RuntimeError('CUDA is required for stage2_eval.py')
 
     device = torch.device('cuda')
-    dataset = EPNPointCloudDataset(
+    dataset = ShapeNetPointCloudDataset(
         data_root=args.data_root,
         split=args.split,
         class_id=args.class_id,
-        per_class=True,
-        num_input_points=768,
-        num_complete_points=2048,
+        num_input_points=2048,
+        num_complete_points=8192,
     )
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        collate_fn=epn_point_collate_fn,
+        collate_fn=shapenet_point_collate_fn,
         pin_memory=True,
         drop_last=False,
         persistent_workers=args.num_workers > 0,
@@ -91,7 +91,7 @@ def main() -> None:
             pred_tokens = transport.transport(src.tokens, src.centers, num_steps=args.transport_steps)
             pred_points = decoder(pred_tokens, src.centers).coarse_points
             loss = chamfer_distance_l2(pred_points, complete_points)
-            metrics = compute_completion_metrics(pred_points, complete_points, iou_resolution=args.iou_resolution)
+            metrics = compute_completion_metrics(pred_points, complete_points, iou_resolution=args.iou_resolution, metric_points=args.metric_points)
             totals['loss'] += float(loss.item())
             for key in ('chamfer_distance', 'chamfer_distance_l1', 'emd', 'iou'):
                 totals[key] += metrics[key]
@@ -101,7 +101,7 @@ def main() -> None:
                 break
 
     result = {key: value / max(num_batches, 1) for key, value in totals.items()}
-    result.update({'num_batches': num_batches, 'split': args.split, 'class_id': args.class_id})
+    result.update({'num_batches': num_batches, 'split': args.split, 'class_id': args.class_id or 'all'})
     print(json.dumps(result), flush=True)
 
 

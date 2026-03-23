@@ -10,15 +10,15 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
 from tqdm.auto import tqdm
 
-from bridgerae.datasets import EPNPointCloudDataset, epn_point_collate_fn
+from bridgerae.datasets import ShapeNetPointCloudDataset, shapenet_point_collate_fn
 from bridgerae.models import LatentTransportModel, PointMAEEncoder, QueryCompletionDecoder
 from bridgerae.training.losses import chamfer_distance_l2
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='BridgeRAE stage-2 latent transport training')
-    parser.add_argument('--data-root', type=Path, default=Path('/root/autodl-tmp/projects/DiffComplete/data/3d_epn'))
-    parser.add_argument('--class-id', type=str, default='03001627')
+    parser.add_argument('--data-root', type=Path, default=Path('/root/autodl-tmp/datasets/ShapeNet55_PoinTrPairs'))
+    parser.add_argument('--class-id', type=str, default=None)
     parser.add_argument('--stage1-ckpt', type=Path, required=True)
     parser.add_argument('--encoder-ckpt', type=Path, default=Path('/root/autodl-tmp/projects/Point-MAE/checkpoint/pretrain.pth'))
     parser.add_argument('--batch-size', type=int, default=128)
@@ -41,13 +41,12 @@ def parse_args() -> argparse.Namespace:
 
 
 def build_loaders(args: argparse.Namespace) -> tuple[DataLoader, DataLoader, int, int]:
-    dataset = EPNPointCloudDataset(
+    dataset = ShapeNetPointCloudDataset(
         data_root=args.data_root,
         split='train',
         class_id=args.class_id,
-        per_class=True,
-        num_input_points=768,
-        num_complete_points=2048,
+        num_input_points=2048,
+        num_complete_points=8192,
     )
     num_samples = len(dataset)
     num_val = max(1, int(num_samples * args.val_ratio))
@@ -56,14 +55,14 @@ def build_loaders(args: argparse.Namespace) -> tuple[DataLoader, DataLoader, int
     perm = torch.randperm(num_samples, generator=generator).tolist()
     train_indices = perm[:num_train]
     val_indices = perm[num_train:]
-    train_loader = DataLoader(Subset(dataset, train_indices), batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, collate_fn=epn_point_collate_fn, pin_memory=True, drop_last=False, persistent_workers=args.num_workers > 0)
-    val_loader = DataLoader(Subset(dataset, val_indices), batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, collate_fn=epn_point_collate_fn, pin_memory=True, drop_last=False, persistent_workers=args.num_workers > 0)
+    train_loader = DataLoader(Subset(dataset, train_indices), batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, collate_fn=shapenet_point_collate_fn, pin_memory=True, drop_last=False, persistent_workers=args.num_workers > 0)
+    val_loader = DataLoader(Subset(dataset, val_indices), batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, collate_fn=shapenet_point_collate_fn, pin_memory=True, drop_last=False, persistent_workers=args.num_workers > 0)
     return train_loader, val_loader, num_train, num_val
 
 
 def load_frozen_decoder(checkpoint_path: Path, device: torch.device) -> QueryCompletionDecoder:
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
-    decoder = QueryCompletionDecoder(hidden_dim=384, num_queries=256, num_heads=6, depth=6, output_points=2048).to(device)
+    decoder = QueryCompletionDecoder(hidden_dim=384, num_queries=256, num_heads=6, depth=6, output_points=8192).to(device)
     decoder.load_state_dict(checkpoint['decoder'])
     decoder.eval()
     for p in decoder.parameters():
@@ -136,6 +135,7 @@ def main() -> None:
         'train_steps_per_epoch': len(train_loader),
         'val_steps_per_epoch': len(val_loader),
         'epochs': args.epochs,
+        'class_id': args.class_id or 'all',
         'stage1_ckpt': str(args.stage1_ckpt),
     }), flush=True)
 

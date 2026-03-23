@@ -101,7 +101,7 @@ class QueryCompletionDecoder(nn.Module):
         num_heads: int = 6,
         depth: int = 6,
         mlp_ratio: float = 4.0,
-        output_points: int = 2048,
+        output_points: int = 8192,
     ) -> None:
         super().__init__()
         if output_points % num_queries != 0:

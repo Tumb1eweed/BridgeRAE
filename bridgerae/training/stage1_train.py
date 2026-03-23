@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from pathlib import Path
 
@@ -9,7 +10,7 @@ import torch
 from torch.utils.data import DataLoader, Subset
 from tqdm.auto import tqdm
 
-from bridgerae.datasets import EPNPointCloudDataset, epn_point_collate_fn
+from bridgerae.datasets import ShapeNetPointCloudDataset, shapenet_point_collate_fn
 from bridgerae.models import PointMAEEncoder, QueryCompletionDecoder
 from bridgerae.training.losses import chamfer_distance_l2
 from bridgerae.training.metrics import compute_completion_metrics
@@ -17,8 +18,8 @@ from bridgerae.training.metrics import compute_completion_metrics
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='BridgeRAE stage-1 training')
-    parser.add_argument('--data-root', type=Path, default=Path('/root/autodl-tmp/projects/DiffComplete/data/3d_epn'))
-    parser.add_argument('--class-id', type=str, default='03001627')
+    parser.add_argument('--data-root', type=Path, default=Path('/root/autodl-tmp/datasets/ShapeNet55_PoinTrPairs'))
+    parser.add_argument('--class-id', type=str, default=None)
     parser.add_argument('--batch-size', type=int, default=256)
     parser.add_argument('--num-workers', type=int, default=8)
     parser.add_argument('--epochs', type=int, default=30)
@@ -28,11 +29,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--save-dir', type=Path, default=Path('/root/autodl-tmp/projects/BridgeRAE/outputs/stage1'))
     parser.add_argument('--encoder-ckpt', type=Path, default=Path('/root/autodl-tmp/projects/Point-MAE/checkpoint/pretrain.pth'))
     parser.add_argument('--max-steps', type=int, default=None)
-    parser.add_argument('--max-val-batches', type=int, default=None)
+    parser.add_argument('--max-val-batches', type=int, default=50)
     parser.add_argument('--amp', action='store_true')
-    parser.add_argument('--val-ratio', type=float, default=0.1)
+    parser.add_argument('--val-ratio', type=float, default=0.01)
     parser.add_argument('--split-seed', type=int, default=42)
     parser.add_argument('--iou-resolution', type=int, default=32)
+    parser.add_argument('--metric-points', type=int, default=2048)
     return parser.parse_args()
 
 
@@ -52,13 +54,12 @@ def save_checkpoint(path: Path, epoch: int, step: int, decoder: QueryCompletionD
 
 
 def build_train_val_loaders(args: argparse.Namespace) -> tuple[DataLoader, DataLoader, int, int]:
-    dataset = EPNPointCloudDataset(
+    dataset = ShapeNetPointCloudDataset(
         data_root=args.data_root,
         split='train',
         class_id=args.class_id,
-        per_class=True,
-        num_input_points=768,
-        num_complete_points=2048,
+        num_input_points=2048,
+        num_complete_points=8192,
     )
     num_samples = len(dataset)
     num_val = max(1, int(num_samples * args.val_ratio))
@@ -73,7 +74,7 @@ def build_train_val_loaders(args: argparse.Namespace) -> tuple[DataLoader, DataL
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        collate_fn=epn_point_collate_fn,
+        collate_fn=shapenet_point_collate_fn,
         pin_memory=True,
         drop_last=False,
         persistent_workers=args.num_workers > 0,
@@ -83,7 +84,7 @@ def build_train_val_loaders(args: argparse.Namespace) -> tuple[DataLoader, DataL
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        collate_fn=epn_point_collate_fn,
+        collate_fn=shapenet_point_collate_fn,
         pin_memory=True,
         drop_last=False,
         persistent_workers=args.num_workers > 0,
@@ -97,6 +98,7 @@ def evaluate(
     loader: DataLoader,
     device: torch.device,
     iou_resolution: int,
+    metric_points: int | None,
     max_batches: int | None,
 ) -> dict[str, float]:
     decoder.eval()
@@ -116,7 +118,7 @@ def evaluate(
             enc = encoder(partial_points)
             pred = decoder(enc.tokens, enc.centers).coarse_points
             loss = chamfer_distance_l2(pred, complete_points)
-            metrics = compute_completion_metrics(pred, complete_points, iou_resolution=iou_resolution)
+            metrics = compute_completion_metrics(pred, complete_points, iou_resolution=iou_resolution, metric_points=metric_points)
             totals['val_loss'] += float(loss.item())
             totals['val_chamfer_distance'] += metrics['chamfer_distance']
             totals['val_chamfer_distance_l1'] += metrics['chamfer_distance_l1']
@@ -141,7 +143,7 @@ def main() -> None:
     train_loader, val_loader, num_train, num_val = build_train_val_loaders(args)
 
     encoder = PointMAEEncoder(pretrained_ckpt=str(args.encoder_ckpt), freeze=True).to(device)
-    decoder = QueryCompletionDecoder(hidden_dim=384, num_queries=256, num_heads=6, depth=6, output_points=2048).to(device)
+    decoder = QueryCompletionDecoder(hidden_dim=384, num_queries=256, num_heads=6, depth=6, output_points=8192).to(device)
     optimizer = torch.optim.AdamW(decoder.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scaler = torch.amp.GradScaler('cuda', enabled=args.amp)
 
@@ -151,7 +153,7 @@ def main() -> None:
         'batch_size': args.batch_size,
         'train_steps_per_epoch': len(train_loader),
         'val_steps_per_epoch': len(val_loader),
-        'class_id': args.class_id,
+        'class_id': args.class_id or 'all',
         'amp': args.amp,
         'epochs': args.epochs,
     }
@@ -159,15 +161,24 @@ def main() -> None:
 
     global_step = 0
     best_val_loss = float('inf')
-    epoch_bar = tqdm(range(args.epochs), desc='Epochs', dynamic_ncols=True)
+    epoch_bar = tqdm(range(args.epochs), desc='Epochs', dynamic_ncols=True, file=sys.stdout)
     for epoch in epoch_bar:
         decoder.train()
         epoch_start = time.time()
         running_loss = 0.0
         steps_this_epoch = 0
         torch.cuda.reset_peak_memory_stats(device)
+        tqdm.write(f'[stage1] epoch {epoch + 1}/{args.epochs} start', file=sys.stdout)
 
-        for batch_idx, batch in enumerate(train_loader):
+        train_iter = tqdm(
+            enumerate(train_loader),
+            total=len(train_loader),
+            desc=f'Epoch {epoch + 1}/{args.epochs}',
+            dynamic_ncols=True,
+            leave=False,
+            file=sys.stdout,
+        )
+        for batch_idx, batch in train_iter:
             partial_points = batch['partial_points'].to(device, non_blocking=True)
             complete_points = batch['complete_points'].to(device, non_blocking=True)
 
@@ -186,6 +197,11 @@ def main() -> None:
             running_loss += float(loss.item())
             steps_this_epoch += 1
             global_step += 1
+
+            train_iter.set_postfix({
+                'loss': f'{float(loss.item()):.4f}',
+                'step': global_step,
+            })
 
             if batch_idx % args.log_every == 0:
                 max_mem = torch.cuda.max_memory_allocated(device=device) / 1024**3
@@ -208,6 +224,7 @@ def main() -> None:
             loader=val_loader,
             device=device,
             iou_resolution=args.iou_resolution,
+            metric_points=args.metric_points,
             max_batches=args.max_val_batches,
         )
         epoch_time = time.time() - epoch_start

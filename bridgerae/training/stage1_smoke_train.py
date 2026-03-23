@@ -6,15 +6,15 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader, Subset
 
-from bridgerae.datasets import EPNPointCloudDataset, epn_point_collate_fn
+from bridgerae.datasets import ShapeNetPointCloudDataset, shapenet_point_collate_fn
 from bridgerae.models import PointMAEEncoder, QueryCompletionDecoder
 from bridgerae.training.losses import chamfer_distance_l2
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='BridgeRAE stage-1 smoke training')
-    parser.add_argument('--data-root', type=Path, default=Path('/root/autodl-tmp/projects/DiffComplete/data/3d_epn'))
-    parser.add_argument('--class-id', type=str, default='03001627')
+    parser.add_argument('--data-root', type=Path, default=Path('/root/autodl-tmp/datasets/ShapeNet55_PoinTrPairs'))
+    parser.add_argument('--class-id', type=str, default=None)
     parser.add_argument('--batch-size', type=int, default=2)
     parser.add_argument('--max-samples', type=int, default=8)
     parser.add_argument('--num-workers', type=int, default=0)
@@ -30,13 +30,12 @@ def main() -> None:
         raise RuntimeError('CUDA is required for this smoke training script.')
 
     device = torch.device('cuda')
-    dataset = EPNPointCloudDataset(
+    dataset = ShapeNetPointCloudDataset(
         data_root=args.data_root,
         split='train',
         class_id=args.class_id,
-        per_class=True,
-        num_input_points=768,
-        num_complete_points=2048,
+        num_input_points=2048,
+        num_complete_points=8192,
     )
     subset = Subset(dataset, list(range(min(args.max_samples, len(dataset)))))
     loader = DataLoader(
@@ -44,12 +43,12 @@ def main() -> None:
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        collate_fn=epn_point_collate_fn,
+        collate_fn=shapenet_point_collate_fn,
         drop_last=False,
     )
 
     encoder = PointMAEEncoder(pretrained_ckpt=str(args.encoder_ckpt), freeze=True).to(device)
-    decoder = QueryCompletionDecoder(hidden_dim=384, num_queries=256, num_heads=6, depth=6, output_points=2048).to(device)
+    decoder = QueryCompletionDecoder(hidden_dim=384, num_queries=256, num_heads=6, depth=6, output_points=8192).to(device)
     optimizer = torch.optim.AdamW(decoder.parameters(), lr=args.lr, weight_decay=0.05)
 
     decoder.train()

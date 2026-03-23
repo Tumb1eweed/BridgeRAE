@@ -4,13 +4,15 @@ experiment:
   device: cuda
 
 dataset:
-  name: paired_completion_dataset
+  name: shapenet55_pointr_pairs
+  data_root: /root/autodl-tmp/datasets/ShapeNet55_PoinTrPairs
   train_split: train
-  val_split: val
-  num_input_points: 768
-  num_output_points: 2048
+  val_split: test
+  class_id: null
+  num_input_points: 2048
+  num_output_points: 8192
   normalize: true
-  partial_mode: random_crop
+  partial_mode: multi_view_pairs
 
 encoder:
   type: pointmae_frozen
@@ -37,7 +39,7 @@ decoder:
   depth: 6
   num_heads: 6
   mlp_ratio: 4.0
-  output_points: 2048
+  output_points: 8192
 
 loss:
   chamfer: l1
