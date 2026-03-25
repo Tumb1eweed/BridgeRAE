@@ -11,12 +11,12 @@ from torch.utils.data import DataLoader, Subset
 from tqdm.auto import tqdm
 
 from bridgerae.datasets import ShapeNetPointCloudDataset, shapenet_point_collate_fn
-from bridgerae.models import LatentTransportModel, PointMAEEncoder, QueryCompletionDecoder
+from bridgerae.models import LatentDiffusionDiT, PointMAEEncoder, QueryCompletionDecoder
 from bridgerae.training.losses import chamfer_distance_l2
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='BridgeRAE stage-2 latent transport training')
+    parser = argparse.ArgumentParser(description='BridgeRAE stage-2 latent diffusion DiT training')
     parser.add_argument('--data-root', type=Path, default=Path('/root/autodl-tmp/datasets/ShapeNet55_PoinTrPairs'))
     parser.add_argument('--class-id', type=str, default=None)
     parser.add_argument('--stage1-ckpt', type=Path, required=True)
@@ -27,14 +27,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--lr', type=float, default=2e-4)
     parser.add_argument('--weight-decay', type=float, default=5e-2)
     parser.add_argument('--log-every', type=int, default=25)
-    parser.add_argument('--save-dir', type=Path, default=Path('/root/autodl-tmp/projects/BridgeRAE/outputs/stage2'))
+    parser.add_argument('--save-dir', type=Path, default=Path('/root/autodl-tmp/projects/BridgeRAE/outputs/stage2_dit'))
     parser.add_argument('--amp', action='store_true')
     parser.add_argument('--val-ratio', type=float, default=0.1)
     parser.add_argument('--split-seed', type=int, default=42)
-    parser.add_argument('--latent-noise-std', type=float, default=0.01)
-    parser.add_argument('--flow-weight', type=float, default=1.0)
+    parser.add_argument('--diffusion-steps', type=int, default=1000)
+    parser.add_argument('--sample-steps', type=int, default=100)
+    parser.add_argument('--noise-weight', type=float, default=1.0)
     parser.add_argument('--recon-weight', type=float, default=1.0)
-    parser.add_argument('--transport-steps', type=int, default=8)
     parser.add_argument('--max-steps', type=int, default=None)
     parser.add_argument('--max-val-batches', type=int, default=None)
     return parser.parse_args()
@@ -70,28 +70,17 @@ def load_frozen_decoder(checkpoint_path: Path, device: torch.device) -> QueryCom
     return decoder
 
 
-def sample_bridge_state(source_tokens: torch.Tensor, target_tokens: torch.Tensor, noise_std: float) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    batch_size = source_tokens.shape[0]
-    t = torch.rand(batch_size, device=source_tokens.device, dtype=source_tokens.dtype)
-    interp = (1.0 - t)[:, None, None] * source_tokens + t[:, None, None] * target_tokens
-    if noise_std > 0:
-        noise_scale = noise_std * torch.sqrt((t * (1.0 - t)).clamp_min(1e-4))[:, None, None]
-        interp = interp + noise_scale * torch.randn_like(interp)
-    velocity_target = target_tokens - source_tokens
-    return interp, velocity_target, t
-
-
 def evaluate(
     encoder: PointMAEEncoder,
     decoder: QueryCompletionDecoder,
-    transport: LatentTransportModel,
+    dit: LatentDiffusionDiT,
     loader: DataLoader,
     device: torch.device,
-    transport_steps: int,
+    sample_steps: int,
     max_batches: int | None,
 ) -> dict[str, float]:
-    transport.eval()
-    totals = {'val_total_loss': 0.0, 'val_flow_loss': 0.0, 'val_recon_loss': 0.0}
+    dit.eval()
+    totals = {'val_total_loss': 0.0, 'val_noise_loss': 0.0, 'val_recon_loss': 0.0}
     num_batches = 0
     with torch.no_grad():
         for batch in loader:
@@ -99,15 +88,16 @@ def evaluate(
             complete_points = batch['complete_points'].to(device, non_blocking=True)
             src = encoder(partial_points)
             tgt = encoder(complete_points, centers=src.centers)
-            bridge_state, velocity_target, t = sample_bridge_state(src.tokens, tgt.tokens, noise_std=0.0)
-            out = transport(bridge_state, src.tokens, src.centers, t)
-            flow_loss = F.mse_loss(out.velocity, velocity_target)
-            pred_tokens = transport.transport(src.tokens, src.centers, num_steps=transport_steps)
+            t = torch.randint(0, dit.diffusion_steps, (src.tokens.shape[0],), device=device, dtype=torch.long)
+            noisy_tokens, noise = dit.q_sample(tgt.tokens, t)
+            out = dit(noisy_tokens, src.tokens, src.centers, t)
+            noise_loss = F.mse_loss(out.noise_pred, noise)
+            pred_tokens = dit.sample(src.tokens, src.centers, num_steps=sample_steps)
             pred_points = decoder(pred_tokens, src.centers).coarse_points
             recon_loss = chamfer_distance_l2(pred_points, complete_points)
-            totals['val_flow_loss'] += float(flow_loss.item())
+            totals['val_noise_loss'] += float(noise_loss.item())
             totals['val_recon_loss'] += float(recon_loss.item())
-            totals['val_total_loss'] += float((flow_loss + recon_loss).item())
+            totals['val_total_loss'] += float((noise_loss + recon_loss).item())
             num_batches += 1
             if max_batches is not None and num_batches >= max_batches:
                 break
@@ -124,8 +114,8 @@ def main() -> None:
 
     encoder = PointMAEEncoder(pretrained_ckpt=str(args.encoder_ckpt), freeze=True).to(device)
     decoder = load_frozen_decoder(args.stage1_ckpt, device)
-    transport = LatentTransportModel(hidden_dim=384, depth=6, num_heads=6).to(device)
-    optimizer = torch.optim.AdamW(transport.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    dit = LatentDiffusionDiT(hidden_dim=384, depth=8, num_heads=6, diffusion_steps=args.diffusion_steps).to(device)
+    optimizer = torch.optim.AdamW(dit.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scaler = torch.amp.GradScaler('cuda', enabled=args.amp)
 
     print(json.dumps({
@@ -137,16 +127,18 @@ def main() -> None:
         'epochs': args.epochs,
         'class_id': args.class_id or 'all',
         'stage1_ckpt': str(args.stage1_ckpt),
+        'diffusion_steps': args.diffusion_steps,
+        'sample_steps': args.sample_steps,
     }), flush=True)
 
     global_step = 0
     best_val = float('inf')
-    epoch_bar = tqdm(range(args.epochs), desc='Stage2', dynamic_ncols=True)
+    epoch_bar = tqdm(range(args.epochs), desc='Stage2-DiT', dynamic_ncols=True)
     for epoch in epoch_bar:
-        transport.train()
+        dit.train()
         epoch_start = time.time()
         running_total = 0.0
-        running_flow = 0.0
+        running_noise = 0.0
         running_recon = 0.0
         steps = 0
         torch.cuda.reset_peak_memory_stats(device)
@@ -157,23 +149,23 @@ def main() -> None:
             with torch.no_grad():
                 src = encoder(partial_points)
                 tgt = encoder(complete_points, centers=src.centers)
-                bridge_state, velocity_target, t = sample_bridge_state(src.tokens, tgt.tokens, noise_std=args.latent_noise_std)
+                t = torch.randint(0, dit.diffusion_steps, (src.tokens.shape[0],), device=device, dtype=torch.long)
+                noisy_tokens, noise = dit.q_sample(tgt.tokens, t)
 
             optimizer.zero_grad(set_to_none=True)
             with torch.amp.autocast('cuda', enabled=args.amp):
-                out = transport(bridge_state, src.tokens, src.centers, t)
-                flow_loss = F.mse_loss(out.velocity, velocity_target)
-                pred_tokens = transport.transport(src.tokens, src.centers, num_steps=args.transport_steps)
-                pred_points = decoder(pred_tokens, src.centers).coarse_points
+                out = dit(noisy_tokens, src.tokens, src.centers, t)
+                noise_loss = F.mse_loss(out.noise_pred, noise)
+                pred_points = decoder(out.x0_pred, src.centers).coarse_points
                 recon_loss = chamfer_distance_l2(pred_points, complete_points)
-                loss = args.flow_weight * flow_loss + args.recon_weight * recon_loss
+                loss = args.noise_weight * noise_loss + args.recon_weight * recon_loss
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
 
             running_total += float(loss.item())
-            running_flow += float(flow_loss.item())
+            running_noise += float(noise_loss.item())
             running_recon += float(recon_loss.item())
             steps += 1
             global_step += 1
@@ -185,7 +177,7 @@ def main() -> None:
                     'step': global_step,
                     'batch_idx': batch_idx,
                     'loss': float(loss.item()),
-                    'flow_loss': float(flow_loss.item()),
+                    'noise_loss': float(noise_loss.item()),
                     'recon_loss': float(recon_loss.item()),
                     'max_mem_gb': round(torch.cuda.max_memory_allocated(device=device) / 1024**3, 3),
                 }), flush=True)
@@ -193,11 +185,11 @@ def main() -> None:
             if args.max_steps is not None and global_step >= args.max_steps:
                 break
 
-        val_metrics = evaluate(encoder, decoder, transport, val_loader, device, args.transport_steps, args.max_val_batches)
+        val_metrics = evaluate(encoder, decoder, dit, val_loader, device, args.sample_steps, args.max_val_batches)
         summary = {
             'epoch': epoch,
             'train_total_loss': running_total / max(steps, 1),
-            'train_flow_loss': running_flow / max(steps, 1),
+            'train_noise_loss': running_noise / max(steps, 1),
             'train_recon_loss': running_recon / max(steps, 1),
             **val_metrics,
             'epoch_time_sec': round(time.time() - epoch_start, 2),
@@ -212,7 +204,7 @@ def main() -> None:
         ckpt = {
             'epoch': epoch,
             'step': global_step,
-            'transport': transport.state_dict(),
+            'dit': dit.state_dict(),
             'optimizer': optimizer.state_dict(),
             'args': vars(args),
             'metrics': summary,

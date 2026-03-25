@@ -4,9 +4,10 @@
 
 Build a point cloud completion baseline that combines:
 
-- BridgeShape's latent-space completion perspective
+- a latent-space completion pipeline
 - RAE's frozen-encoder and trainable-decoder stage-1 design
 - Point-MAE's grouped point encoder
+- a DiT-based latent diffusion stage for conditional generation
 
 ## Recommended Order
 
@@ -69,21 +70,19 @@ Goal:
 
 - verify that the latent representation is sufficient for completion
 
-### 5. Add latent bridge / diffusion after the autoencoding baseline is stable
+### 5. Add conditional latent diffusion after the autoencoding baseline is stable
 
-After stage-1 works, add a stage-2 latent model inspired by BridgeShape:
+After stage-1 works, add a stage-2 latent model with DiT:
 
-- encode partial shape to partial latent
-- encode complete shape to complete latent
-- learn a conditional latent transition from partial to complete
+- encode partial shape to conditional latent tokens
+- encode complete shape to target latent tokens
+- train a conditional diffusion model from noisy target latents under the partial latent condition
 
 Goal:
 
-- bring in BridgeShape's transport / generative formulation on top of a stable representation baseline
+- add a generative latent stage on top of a stable representation baseline
 
 ## Practical Rule
-
-Do not start from the full BridgeShape Schrödinger bridge implementation.
 
 Start from the point-cloud RAE baseline first:
 
@@ -91,4 +90,4 @@ Start from the point-cloud RAE baseline first:
 2. Point-MAE encoder
 3. frozen encoder + trainable decoder
 4. deterministic completion training
-5. latent bridge / diffusion
+5. conditional latent diffusion with DiT

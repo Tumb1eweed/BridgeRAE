@@ -3,8 +3,8 @@
 ## Code Layout
 
 - `bridgerae/datasets/shapenet_pairs.py` contains the ShapeNet55 PoinTrPairs point-pair loader.
-- `bridgerae/models/` contains Point-MAE encoder wrapping, completion decoder, and latent transport model.
-- `bridgerae/training/` contains stage-1 and stage-2 train/eval entry points.
+- `bridgerae/models/` contains the Point-MAE encoder wrapper, completion decoder, and latent DiT model.
+- `bridgerae/training/` contains the stage-1 and stage-2 train and eval entry points.
 
 ## Dataset
 

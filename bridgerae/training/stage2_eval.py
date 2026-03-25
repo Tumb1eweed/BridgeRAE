@@ -8,13 +8,13 @@ import torch
 from torch.utils.data import DataLoader
 
 from bridgerae.datasets import ShapeNetPointCloudDataset, shapenet_point_collate_fn
-from bridgerae.models import LatentTransportModel, PointMAEEncoder, QueryCompletionDecoder
+from bridgerae.models import LatentDiffusionDiT, PointMAEEncoder, QueryCompletionDecoder
 from bridgerae.training.losses import chamfer_distance_l2
 from bridgerae.training.metrics import compute_completion_metrics
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='BridgeRAE stage-2 latent transport evaluation')
+    parser = argparse.ArgumentParser(description='BridgeRAE stage-2 latent diffusion DiT evaluation')
     parser.add_argument('--data-root', type=Path, default=Path('/root/autodl-tmp/datasets/ShapeNet55_PoinTrPairs'))
     parser.add_argument('--class-id', type=str, default=None)
     parser.add_argument('--stage2-ckpt', type=Path, required=True)
@@ -23,7 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--split', type=str, default='test', choices=['train', 'test'])
     parser.add_argument('--batch-size', type=int, default=128)
     parser.add_argument('--num-workers', type=int, default=8)
-    parser.add_argument('--transport-steps', type=int, default=8)
+    parser.add_argument('--sample-steps', type=int, default=100)
     parser.add_argument('--max-batches', type=int, default=None)
     parser.add_argument('--iou-resolution', type=int, default=32)
     parser.add_argument('--metric-points', type=int, default=2048)
@@ -38,10 +38,17 @@ def load_stage1_decoder(checkpoint_path: Path, device: torch.device) -> QueryCom
     return decoder
 
 
-def load_stage2_transport(checkpoint_path: Path, device: torch.device) -> LatentTransportModel:
+def load_stage2_dit(checkpoint_path: Path, device: torch.device) -> LatentDiffusionDiT:
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
-    model = LatentTransportModel(hidden_dim=384, depth=6, num_heads=6).to(device)
-    model.load_state_dict(checkpoint['transport'])
+    args = checkpoint.get('args', {})
+    model = LatentDiffusionDiT(
+        hidden_dim=384,
+        depth=8,
+        num_heads=6,
+        diffusion_steps=args.get('diffusion_steps', 1000),
+    ).to(device)
+    state_dict = checkpoint['dit']
+    model.load_state_dict(state_dict)
     model.eval()
     return model
 
@@ -72,7 +79,7 @@ def main() -> None:
 
     encoder = PointMAEEncoder(pretrained_ckpt=str(args.encoder_ckpt), freeze=True).to(device)
     decoder = load_stage1_decoder(args.stage1_ckpt, device)
-    transport = load_stage2_transport(args.stage2_ckpt, device)
+    dit = load_stage2_dit(args.stage2_ckpt, device)
 
     totals = {
         'loss': 0.0,
@@ -88,7 +95,7 @@ def main() -> None:
             partial_points = batch['partial_points'].to(device, non_blocking=True)
             complete_points = batch['complete_points'].to(device, non_blocking=True)
             src = encoder(partial_points)
-            pred_tokens = transport.transport(src.tokens, src.centers, num_steps=args.transport_steps)
+            pred_tokens = dit.sample(src.tokens, src.centers, num_steps=args.sample_steps)
             pred_points = decoder(pred_tokens, src.centers).coarse_points
             loss = chamfer_distance_l2(pred_points, complete_points)
             metrics = compute_completion_metrics(pred_points, complete_points, iou_resolution=args.iou_resolution, metric_points=args.metric_points)

@@ -2,9 +2,9 @@
 
 `BridgeRAE` is a point cloud completion baseline that combines:
 
-- `BridgeShape`: latent-space completion and transport-oriented conditional generation.
 - `RAE`: frozen pretrained encoder + trainable decoder as the stage-1 recipe.
 - `Point-MAE`: grouped point tokenizer and transformer encoder as the encoder backbone.
+- `DiT`: conditional latent diffusion for stage-2 completion generation.
 
 ## Goal
 
@@ -15,7 +15,7 @@ Output: complete point cloud `X_c \in R^{N_c x 3}`
 Current pipeline has two stages:
 
 1. `Stage 1`: frozen Point-MAE encoder + trainable completion decoder.
-2. `Stage 2`: latent transport from partial latent to complete latent, then decode with the stage-1 decoder.
+2. `Stage 2`: conditional latent diffusion with DiT from partial latent condition to complete latent samples, then decode with the stage-1 decoder.
 
 ## Dataset
 
@@ -65,7 +65,7 @@ BridgeRAE/
 │   ├── models/
 │   │   ├── pointmae_encoder.py
 │   │   ├── completion_decoder.py
-│   │   └── latent_transport.py
+│   │   └── latent_dit.py
 │   └── training/
 │       ├── stage1_train.py
 │       ├── stage1_eval.py
@@ -92,11 +92,11 @@ BridgeRAE/
 
 ### Stage 2
 
-1. Encode `partial_points` to source latent tokens.
+1. Encode `partial_points` to conditional latent tokens.
 2. Reuse the same patch centers to encode `complete_points` to aligned target latent tokens.
-3. Train `LatentTransportModel` to predict latent transport velocity.
-4. Decode transported latent tokens with the frozen stage-1 decoder.
-5. Optimize latent flow loss and point reconstruction loss together.
+3. Sample a diffusion timestep and corrupt the target latent with Gaussian noise.
+4. Train `LatentDiffusionDiT` to predict the injected noise under the partial latent condition.
+5. Run iterative denoising at inference time and decode the sampled latent tokens with the frozen stage-1 decoder.
 
 ## Training
 
@@ -124,9 +124,11 @@ conda run -n bridgerae python -m bridgerae.training.stage2_train \
   --num-workers 8 \
   --log-every 25 \
   --amp \
-  --save-dir /root/autodl-tmp/projects/BridgeRAE/outputs/stage2_ep30
+  --diffusion-steps 1000 \
+  --sample-steps 100 \
+  --save-dir /root/autodl-tmp/projects/BridgeRAE/outputs/stage2_dit_ep30
 ```
 
 Default training and evaluation use all categories. You can still pass `--class-id <taxonomy_id>` to restrict to one ShapeNet category.
 
-Existing 2048-point stage-1 or stage-2 checkpoints are not shape-compatible with the new 8192-point decoder and should be retrained.
+Existing stage-2 checkpoints from older formulations are not compatible with the DiT-based stage-2 model and should be retrained.
