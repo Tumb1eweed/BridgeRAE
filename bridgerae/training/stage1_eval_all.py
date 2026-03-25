@@ -15,15 +15,18 @@ from bridgerae.training.metrics import compute_completion_metrics
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='BridgeRAE stage-1 evaluate all checkpoints')
-    parser.add_argument('--data-root', type=Path, default=Path('/root/autodl-tmp/datasets/ShapeNet55_PoinTrPairs'))
+    parser.add_argument('--data-root', type=Path, default=Path('/root/autodl-tmp/datasets/ShapeNet55'))
+    parser.add_argument('--pair-data-root', type=Path, default=Path('/root/autodl-tmp/datasets/ShapeNet55_PoinTrPairs'))
+    parser.add_argument('--split-set', type=str, default=None)
     parser.add_argument('--ckpt-dir', type=Path, required=True)
     parser.add_argument('--class-id', type=str, default=None)
-    parser.add_argument('--split', type=str, default='test', choices=['train', 'test'])
+    parser.add_argument('--split', type=str, default='test', choices=['train', 'val', 'test'])
     parser.add_argument('--batch-size', type=int, default=128)
     parser.add_argument('--num-workers', type=int, default=8)
     parser.add_argument('--encoder-ckpt', type=Path, default=Path('/root/autodl-tmp/projects/Point-MAE/checkpoint/pretrain.pth'))
     parser.add_argument('--max-batches', type=int, default=None)
     parser.add_argument('--iou-resolution', type=int, default=32)
+    parser.add_argument('--metric-points', type=int, default=2048)
     parser.add_argument('--output-jsonl', type=Path, default=None)
     return parser.parse_args()
 
@@ -42,6 +45,7 @@ def evaluate_checkpoint(
     loader: DataLoader,
     device: torch.device,
     iou_resolution: int,
+    metric_points: int | None,
     max_batches: int | None,
 ) -> dict[str, float]:
     decoder, checkpoint = load_decoder_state(checkpoint_path, device)
@@ -61,7 +65,7 @@ def evaluate_checkpoint(
             enc = encoder(partial_points)
             pred = decoder(enc.tokens, enc.centers).coarse_points
             loss = chamfer_distance_l2(pred, complete_points)
-            metrics = compute_completion_metrics(pred, complete_points, iou_resolution=iou_resolution)
+            metrics = compute_completion_metrics(pred, complete_points, iou_resolution=iou_resolution, metric_points=metric_points)
             totals['eval_loss'] += float(loss.item())
             totals['eval_chamfer_distance'] += metrics['chamfer_distance']
             totals['eval_chamfer_distance_l1'] += metrics['chamfer_distance_l1']
@@ -90,7 +94,9 @@ def main() -> None:
     device = torch.device('cuda')
     dataset = ShapeNetPointCloudDataset(
         data_root=args.data_root,
+        pair_data_root=args.pair_data_root,
         split=args.split,
+        split_set=args.split_set,
         class_id=args.class_id,
         num_input_points=2048,
         num_complete_points=8192,
@@ -121,6 +127,7 @@ def main() -> None:
                 loader=loader,
                 device=device,
                 iou_resolution=args.iou_resolution,
+                metric_points=args.metric_points,
                 max_batches=args.max_batches,
             )
             line = json.dumps(result)

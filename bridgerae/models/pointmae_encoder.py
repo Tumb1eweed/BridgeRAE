@@ -7,6 +7,11 @@ import torch.nn as nn
 from pointnet2_ops import pointnet2_utils
 from timm.models.layers import DropPath, trunc_normal_
 
+try:
+    from knn_cuda import KNN
+except Exception:  # pragma: no cover
+    KNN = None
+
 
 @dataclass(frozen=True)
 class PointMAEEncoderOutput:
@@ -25,11 +30,22 @@ class Group(nn.Module):
         super().__init__()
         self.num_group = num_group
         self.group_size = group_size
+        self.knn = KNN(k=group_size, transpose_mode=True) if KNN is not None else None
+
+    @staticmethod
+    def _square_distance(src: torch.Tensor, dst: torch.Tensor) -> torch.Tensor:
+        dist = -2 * torch.matmul(src, dst.transpose(1, 2))
+        dist += torch.sum(src ** 2, dim=-1, keepdim=True)
+        dist += torch.sum(dst ** 2, dim=-1).unsqueeze(1)
+        return dist
 
     def _gather_neighbors(self, xyz: torch.Tensor, centers: torch.Tensor) -> torch.Tensor:
         batch_size, num_points, _ = xyz.shape
-        distances = torch.cdist(centers, xyz, p=2)
-        idx = distances.topk(k=self.group_size, dim=-1, largest=False).indices
+        if self.knn is not None and xyz.is_cuda and centers.is_cuda:
+            _, idx = self.knn(xyz, centers)
+        else:
+            distances = self._square_distance(centers, xyz)
+            idx = distances.topk(k=self.group_size, dim=-1, largest=False).indices
         idx_base = torch.arange(0, batch_size, device=xyz.device).view(-1, 1, 1) * num_points
         idx = (idx + idx_base).reshape(-1)
         neighborhoods = xyz.reshape(batch_size * num_points, -1)[idx, :]

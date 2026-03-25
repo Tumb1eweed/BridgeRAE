@@ -14,10 +14,12 @@ from bridgerae.training.metrics import compute_completion_metrics
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='BridgeRAE stage-1 evaluation')
-    parser.add_argument('--data-root', type=Path, default=Path('/root/autodl-tmp/datasets/ShapeNet55_PoinTrPairs'))
+    parser.add_argument('--data-root', type=Path, default=Path('/root/autodl-tmp/datasets/ShapeNet55'))
+    parser.add_argument('--pair-data-root', type=Path, default=Path('/root/autodl-tmp/datasets/ShapeNet55_PoinTrPairs'))
+    parser.add_argument('--split-set', type=str, default=None)
     parser.add_argument('--checkpoint', type=Path, required=True)
     parser.add_argument('--class-id', type=str, default=None)
-    parser.add_argument('--split', type=str, default='test', choices=['train', 'test'])
+    parser.add_argument('--split', type=str, default='test', choices=['train', 'val', 'test'])
     parser.add_argument('--batch-size', type=int, default=128)
     parser.add_argument('--num-workers', type=int, default=8)
     parser.add_argument('--encoder-ckpt', type=Path, default=Path('/root/autodl-tmp/projects/Point-MAE/checkpoint/pretrain.pth'))
@@ -43,7 +45,9 @@ def main() -> None:
     device = torch.device('cuda')
     dataset = ShapeNetPointCloudDataset(
         data_root=args.data_root,
+        pair_data_root=args.pair_data_root,
         split=args.split,
+        split_set=args.split_set,
         class_id=args.class_id,
         num_input_points=2048,
         num_complete_points=8192,
@@ -86,7 +90,7 @@ def main() -> None:
                 break
 
     result = {key: value / max(num_batches, 1) for key, value in totals.items()}
-    result.update({'num_batches': num_batches, 'split': args.split, 'class_id': args.class_id or 'all'})
+    result.update({'num_batches': num_batches, 'split': args.split, 'split_set': args.split_set, 'class_id': args.class_id or 'all'})
     print(json.dumps(result), flush=True)
 
 

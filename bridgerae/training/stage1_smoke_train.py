@@ -13,7 +13,9 @@ from bridgerae.training.losses import chamfer_distance_l2
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='BridgeRAE stage-1 smoke training')
-    parser.add_argument('--data-root', type=Path, default=Path('/root/autodl-tmp/datasets/ShapeNet55_PoinTrPairs'))
+    parser.add_argument('--data-root', type=Path, default=Path('/root/autodl-tmp/datasets/ShapeNet55'))
+    parser.add_argument('--pair-data-root', type=Path, default=Path('/root/autodl-tmp/datasets/ShapeNet55_PoinTrPairs'))
+    parser.add_argument('--split-set', type=str, default='ShapeNet-34')
     parser.add_argument('--class-id', type=str, default=None)
     parser.add_argument('--batch-size', type=int, default=2)
     parser.add_argument('--max-samples', type=int, default=8)
@@ -32,7 +34,9 @@ def main() -> None:
     device = torch.device('cuda')
     dataset = ShapeNetPointCloudDataset(
         data_root=args.data_root,
+        pair_data_root=args.pair_data_root,
         split='train',
+        split_set=args.split_set,
         class_id=args.class_id,
         num_input_points=2048,
         num_complete_points=8192,

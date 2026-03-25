@@ -15,12 +15,14 @@ from bridgerae.training.metrics import compute_completion_metrics
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='BridgeRAE stage-2 latent transport evaluation')
-    parser.add_argument('--data-root', type=Path, default=Path('/root/autodl-tmp/datasets/ShapeNet55_PoinTrPairs'))
+    parser.add_argument('--data-root', type=Path, default=Path('/root/autodl-tmp/datasets/ShapeNet55'))
+    parser.add_argument('--pair-data-root', type=Path, default=Path('/root/autodl-tmp/datasets/ShapeNet55_PoinTrPairs'))
+    parser.add_argument('--split-set', type=str, default=None)
     parser.add_argument('--class-id', type=str, default=None)
     parser.add_argument('--stage2-ckpt', type=Path, required=True)
-    parser.add_argument('--stage1-ckpt', type=Path, required=True)
+    parser.add_argument('--stage1-ckpt', type=Path, default=None)
     parser.add_argument('--encoder-ckpt', type=Path, default=Path('/root/autodl-tmp/projects/Point-MAE/checkpoint/pretrain.pth'))
-    parser.add_argument('--split', type=str, default='test', choices=['train', 'test'])
+    parser.add_argument('--split', type=str, default='test', choices=['train', 'val', 'test'])
     parser.add_argument('--batch-size', type=int, default=128)
     parser.add_argument('--num-workers', type=int, default=8)
     parser.add_argument('--transport-steps', type=int, default=8)
@@ -30,20 +32,36 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_stage1_decoder(checkpoint_path: Path, device: torch.device) -> QueryCompletionDecoder:
-    checkpoint = torch.load(checkpoint_path, map_location='cpu')
-    decoder = QueryCompletionDecoder(hidden_dim=384, num_queries=256, num_heads=6, depth=6, output_points=8192).to(device)
-    decoder.load_state_dict(checkpoint['decoder'])
+def _build_decoder(device: torch.device) -> QueryCompletionDecoder:
+    return QueryCompletionDecoder(hidden_dim=384, num_queries=256, num_heads=6, depth=6, output_points=8192).to(device)
+
+
+def load_transport_and_decoder(
+    stage2_checkpoint_path: Path,
+    stage1_checkpoint_path: Path | None,
+    device: torch.device,
+) -> tuple[LatentTransportModel, QueryCompletionDecoder, str]:
+    stage2_checkpoint = torch.load(stage2_checkpoint_path, map_location='cpu')
+
+    transport = LatentTransportModel(hidden_dim=384, depth=6, num_heads=6).to(device)
+    transport.load_state_dict(stage2_checkpoint['transport'])
+    transport.eval()
+
+    decoder = _build_decoder(device)
+    decoder_source = 'stage2'
+    if 'decoder' in stage2_checkpoint:
+        decoder.load_state_dict(stage2_checkpoint['decoder'])
+    else:
+        if stage1_checkpoint_path is None:
+            raise ValueError(
+                'No decoder found in stage2 checkpoint. Please provide --stage1-ckpt for fallback decoder loading.'
+            )
+        stage1_checkpoint = torch.load(stage1_checkpoint_path, map_location='cpu')
+        decoder.load_state_dict(stage1_checkpoint['decoder'])
+        decoder_source = 'stage1'
     decoder.eval()
-    return decoder
 
-
-def load_stage2_transport(checkpoint_path: Path, device: torch.device) -> LatentTransportModel:
-    checkpoint = torch.load(checkpoint_path, map_location='cpu')
-    model = LatentTransportModel(hidden_dim=384, depth=6, num_heads=6).to(device)
-    model.load_state_dict(checkpoint['transport'])
-    model.eval()
-    return model
+    return transport, decoder, decoder_source
 
 
 def main() -> None:
@@ -54,7 +72,9 @@ def main() -> None:
     device = torch.device('cuda')
     dataset = ShapeNetPointCloudDataset(
         data_root=args.data_root,
+        pair_data_root=args.pair_data_root,
         split=args.split,
+        split_set=args.split_set,
         class_id=args.class_id,
         num_input_points=2048,
         num_complete_points=8192,
@@ -71,8 +91,17 @@ def main() -> None:
     )
 
     encoder = PointMAEEncoder(pretrained_ckpt=str(args.encoder_ckpt), freeze=True).to(device)
-    decoder = load_stage1_decoder(args.stage1_ckpt, device)
-    transport = load_stage2_transport(args.stage2_ckpt, device)
+    transport, decoder, decoder_source = load_transport_and_decoder(args.stage2_ckpt, args.stage1_ckpt, device)
+
+    print(json.dumps({
+        'stage2_ckpt': str(args.stage2_ckpt),
+        'stage1_ckpt': str(args.stage1_ckpt) if args.stage1_ckpt is not None else None,
+        'decoder_source': decoder_source,
+        'split': args.split,
+        'split_set': args.split_set,
+        'class_id': args.class_id or 'all',
+        'dataset_size': len(dataset),
+    }), flush=True)
 
     totals = {
         'loss': 0.0,
@@ -101,7 +130,13 @@ def main() -> None:
                 break
 
     result = {key: value / max(num_batches, 1) for key, value in totals.items()}
-    result.update({'num_batches': num_batches, 'split': args.split, 'class_id': args.class_id or 'all'})
+    result.update({
+        'num_batches': num_batches,
+        'split': args.split,
+        'split_set': args.split_set,
+        'class_id': args.class_id or 'all',
+        'decoder_source': decoder_source,
+    })
     print(json.dumps(result), flush=True)
 
 

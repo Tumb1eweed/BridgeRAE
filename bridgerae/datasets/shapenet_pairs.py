@@ -9,7 +9,7 @@ import torch
 from torch.utils.data import Dataset
 
 
-_VALID_SPLITS = {"train", "test"}
+_VALID_SPLITS = {"train", "val", "test"}
 
 
 @dataclass(frozen=True)
@@ -36,7 +36,7 @@ def shapenet_point_collate_fn(samples: list[ShapeNetPointCloudSample]) -> dict[s
 
 
 class ShapeNetPointCloudDataset(Dataset[ShapeNetPointCloudSample]):
-    """Point-pair dataset for ShapeNet55-34 PoinTr-style completion data."""
+    """Point-pair dataset supporting both pair directories and split-file ShapeNet55/34 layouts."""
 
     def __init__(
         self,
@@ -48,6 +48,8 @@ class ShapeNetPointCloudDataset(Dataset[ShapeNetPointCloudSample]):
         normalize_pair: bool = True,
         include_all_views: bool = True,
         view_id: str | None = None,
+        split_set: str | None = None,
+        pair_data_root: str | Path | None = None,
         input_transform: Callable[[torch.Tensor], torch.Tensor] | None = None,
         target_transform: Callable[[torch.Tensor], torch.Tensor] | None = None,
     ) -> None:
@@ -62,11 +64,18 @@ class ShapeNetPointCloudDataset(Dataset[ShapeNetPointCloudSample]):
         self.normalize_pair = normalize_pair
         self.include_all_views = include_all_views
         self.view_id = view_id
+        self.split_set = split_set
+        self.pair_data_root = Path(pair_data_root) if pair_data_root is not None else None
         self.input_transform = input_transform
         self.target_transform = target_transform
         self.samples = self._build_index()
 
     def _build_index(self) -> list[dict[str, object]]:
+        if (self.data_root / 'shapenet_pc').exists():
+            return self._build_split_file_index()
+        return self._build_pair_directory_index()
+
+    def _build_pair_directory_index(self) -> list[dict[str, object]]:
         split_root = self.data_root / self.split
         complete_root = split_root / 'complete'
         partial_root = split_root / 'partial'
@@ -110,6 +119,88 @@ class ShapeNetPointCloudDataset(Dataset[ShapeNetPointCloudSample]):
         if not samples:
             raise RuntimeError(
                 f'No point-pair samples found under {split_root}. '
+                f'class_id={self.class_id!r}, view_id={self.view_id!r}'
+            )
+        return samples
+
+    def _resolve_pair_root(self) -> Path:
+        if self.pair_data_root is not None:
+            return self.pair_data_root
+        sibling = self.data_root.parent / 'ShapeNet55_PoinTrPairs'
+        if sibling.exists():
+            return sibling
+        raise FileNotFoundError(
+            'ShapeNet55 pair root not found. Pass pair_data_root explicitly or place ShapeNet55_PoinTrPairs next to data_root.'
+        )
+
+    def _resolve_split_set(self) -> str:
+        if self.split_set is not None:
+            return self.split_set
+        if self.split in {'train', 'val'}:
+            return 'ShapeNet-34'
+        return 'ShapeNet-Unseen21'
+
+    def _index_pair_partials(self, pair_root: Path) -> dict[tuple[str, str], list[Path]]:
+        partial_map: dict[tuple[str, str], list[Path]] = {}
+        for pair_split in ('train', 'test'):
+            partial_root = pair_root / pair_split / 'partial'
+            if not partial_root.exists():
+                continue
+            class_dirs = [partial_root / self.class_id] if self.class_id else sorted(p for p in partial_root.iterdir() if p.is_dir())
+            for class_dir in class_dirs:
+                if not class_dir.exists():
+                    continue
+                taxonomy_id = class_dir.name
+                for scan_dir in sorted(p for p in class_dir.iterdir() if p.is_dir()):
+                    partials = sorted(scan_dir.glob('*.npy'))
+                    if partials:
+                        partial_map[(taxonomy_id, scan_dir.name)] = partials
+        return partial_map
+
+    def _build_split_file_index(self) -> list[dict[str, object]]:
+        split_set = self._resolve_split_set()
+        split_file = self.data_root / split_set / f'{self.split}.txt'
+        if not split_file.exists():
+            raise FileNotFoundError(f'Split file not found: {split_file}')
+        pc_root = self.data_root / 'shapenet_pc'
+        if not pc_root.exists():
+            raise FileNotFoundError(f'Point cloud root not found: {pc_root}')
+        pair_root = self._resolve_pair_root()
+        partial_map = self._index_pair_partials(pair_root)
+
+        samples: list[dict[str, object]] = []
+        for line in split_file.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            taxonomy_id, model_stub = line.split('-', 1)
+            if self.class_id is not None and taxonomy_id != self.class_id:
+                continue
+            scan_id = model_stub.rsplit('.', 1)[0]
+            complete_path = pc_root / line
+            if not complete_path.exists():
+                continue
+
+            partial_paths = partial_map.get((taxonomy_id, scan_id), [])
+            if self.view_id is not None:
+                partial_paths = [p for p in partial_paths if p.stem == self.view_id]
+            elif not self.include_all_views:
+                partial_paths = partial_paths[:1]
+
+            for partial_path in partial_paths:
+                samples.append(
+                    {
+                        'scan_id': scan_id,
+                        'class_id': taxonomy_id,
+                        'view_id': partial_path.stem,
+                        'partial_path': partial_path,
+                        'complete_path': complete_path,
+                    }
+                )
+
+        if not samples:
+            raise RuntimeError(
+                f'No point-pair samples found for split file {split_file}. '
                 f'class_id={self.class_id!r}, view_id={self.view_id!r}'
             )
         return samples
