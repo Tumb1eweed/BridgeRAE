@@ -3,7 +3,8 @@
 ## Code Layout
 
 - `bridgerae/datasets/shapenet_pairs.py` contains the ShapeNet55 PoinTrPairs point-pair loader.
-- `bridgerae/models/` contains Point-MAE encoder wrapping, completion decoder, and latent transport model.
+- `bridgerae/models/` contains Point-MAE encoder wrapping, completion decoder, latent transport model, and latent normalizer.
+- `bridgerae/models/latent_normalizer.py` — `LatentNormalizer`: channel-wise mean/std normalization for encoder latent tokens. Stats stored as registered buffers, saved/loaded with checkpoints.
 - `bridgerae/training/` contains stage-1 and stage-2 train/eval entry points.
 
 ## Dataset
@@ -18,3 +19,30 @@
 - Default input points: `2048`
 - Default complete points: `8192`
 - Default behavior trains on all categories unless `--class-id` is provided.
+
+## Two-Stage Training Architecture
+
+- **Stage-1 (autoencoder):** `complete → encoder → normalize → (noise) → decoder → complete`. Decoder learns to reconstruct complete shapes from complete latent tokens. Encoder is frozen (Point-MAE pretrained); only decoder is trainable.
+- **Stage-2 (transport):** `partial → encoder → normalize → transport → denormalize → decoder → complete`. Transport model learns to map partial latent to complete latent space. Decoder receives the same distribution it was trained on.
+- Latent stats are collected over **complete** point clouds (not partial) to match the decoder's operating space.
+- Stage-1 does NOT use partial points at all; the paired partial data is only used in stage-2.
+
+## Latent Normalization & Noise Augmentation
+
+- Stage-1 supports `--latent-normalize` to enable channel-wise latent normalization (RAE recipe).
+- Stage-1 supports `--latent-noise-std` (e.g. `0.1`) to add Gaussian noise to normalized latents during training; improves decoder robustness for stage-2.
+- `--latent-stats-batches` controls how many batches are used for stats collection (default: full training set).
+- Normalizer state is saved inside stage-1 checkpoints under key `normalizer`.
+- Stage-2 automatically loads the normalizer from the stage-1 checkpoint if present; no extra flags needed.
+- Data flow with normalizer: `encoder → normalize → (noise, train only) → decoder` (stage-1), `encoder → normalize → transport → denormalize → decoder` (stage-2).
+
+## Latent Transport
+
+- `LatentTransportModel.transport_train()` — Euler integration **with** gradients, used in training so `recon_loss` backprops through the transport model.
+- `LatentTransportModel.transport()` — Euler integration **without** gradients (`@torch.no_grad()`), used for inference/eval only.
+- `TimeEmbedding` uses sinusoidal positional encoding → MLP (not raw scalar input).
+
+## Training Extras
+
+- **LR Scheduler:** Both stages support `--lr-scheduler cosine` (default) with `--warmup-epochs` (default 5) and `--lr-min` (default 1e-6). Use `--lr-scheduler none` for constant LR.
+- **Repulsion Loss:** Stage-1 supports `--repulsion-weight` (default 0) and `--repulsion-k` (default 8) to penalize point clustering.

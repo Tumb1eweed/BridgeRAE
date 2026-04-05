@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import math
+
 import torch
 import torch.nn as nn
 from timm.models.layers import trunc_normal_
@@ -18,14 +20,22 @@ class LatentTransportOutput:
 class TimeEmbedding(nn.Module):
     def __init__(self, dim: int) -> None:
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(1, dim),
+        self.dim = dim
+        half = dim // 2
+        freqs = torch.exp(torch.arange(half, dtype=torch.float32) * -(math.log(10000.0) / half))
+        self.register_buffer('freqs', freqs)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, dim),
             nn.SiLU(),
             nn.Linear(dim, dim),
         )
 
     def forward(self, t: torch.Tensor) -> torch.Tensor:
-        return self.net(t[:, None])
+        t_proj = t[:, None].float() * self.freqs[None, :]  # (B, half)
+        emb = torch.cat([t_proj.sin(), t_proj.cos()], dim=-1)  # (B, dim)
+        if emb.shape[-1] < self.dim:
+            emb = torch.nn.functional.pad(emb, (0, self.dim - emb.shape[-1]))
+        return self.mlp(emb)
 
 
 class LatentTransportBlock(nn.Module):
@@ -97,8 +107,28 @@ class LatentTransportModel(nn.Module):
         for block in self.blocks:
             x = block(x, cond)
         velocity = self.velocity_head(self.norm(x))
-        transported_tokens = source_tokens + velocity
+        transported_tokens = state_tokens + velocity
         return LatentTransportOutput(velocity=velocity, transported_tokens=transported_tokens)
+
+    def transport_train(
+        self,
+        source_tokens: torch.Tensor,
+        centers: torch.Tensor,
+        num_steps: int = 8,
+    ) -> torch.Tensor:
+        """Euler integration with gradients for training."""
+        z = source_tokens
+        dt = 1.0 / float(num_steps)
+        for step in range(num_steps):
+            t = torch.full(
+                (source_tokens.shape[0],),
+                step / float(num_steps),
+                device=source_tokens.device,
+                dtype=source_tokens.dtype,
+            )
+            velocity = self(z, source_tokens, centers, t).velocity
+            z = z + dt * velocity
+        return z
 
     @torch.no_grad()
     def transport(

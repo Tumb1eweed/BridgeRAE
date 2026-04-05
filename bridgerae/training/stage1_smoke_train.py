@@ -6,15 +6,18 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader, Subset
 
-from bridgerae.datasets import ShapeNetPointCloudDataset, shapenet_point_collate_fn
+from bridgerae.datasets import build_pointcloud_dataset, resolve_point_counts, shapenet_point_collate_fn
 from bridgerae.models import PointMAEEncoder, QueryCompletionDecoder
 from bridgerae.training.losses import chamfer_distance_l2
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='BridgeRAE stage-1 smoke training')
-    parser.add_argument('--data-root', type=Path, default=Path('/root/autodl-tmp/datasets/ShapeNet55'))
-    parser.add_argument('--pair-data-root', type=Path, default=Path('/root/autodl-tmp/datasets/ShapeNet55_PoinTrPairs'))
+    parser.add_argument('--dataset', type=str, default='shapenet', choices=['shapenet', 'pcn'])
+    parser.add_argument('--data-root', type=Path, default=None)
+    parser.add_argument('--pair-data-root', type=Path, default=None)
+    parser.add_argument('--num-input-points', type=int, default=None)
+    parser.add_argument('--num-complete-points', type=int, default=None)
     parser.add_argument('--split-set', type=str, default='ShapeNet-34')
     parser.add_argument('--class-id', type=str, default=None)
     parser.add_argument('--batch-size', type=int, default=2)
@@ -28,18 +31,24 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    args.num_input_points, args.num_complete_points = resolve_point_counts(
+        args.dataset,
+        args.num_input_points,
+        args.num_complete_points,
+    )
     if not torch.cuda.is_available():
         raise RuntimeError('CUDA is required for this smoke training script.')
 
     device = torch.device('cuda')
-    dataset = ShapeNetPointCloudDataset(
+    dataset = build_pointcloud_dataset(
+        dataset_name=args.dataset,
         data_root=args.data_root,
-        pair_data_root=args.pair_data_root,
         split='train',
-        split_set=args.split_set,
         class_id=args.class_id,
-        num_input_points=2048,
-        num_complete_points=8192,
+        num_input_points=args.num_input_points,
+        num_complete_points=args.num_complete_points,
+        split_set=args.split_set,
+        pair_data_root=args.pair_data_root,
     )
     subset = Subset(dataset, list(range(min(args.max_samples, len(dataset)))))
     loader = DataLoader(
@@ -52,7 +61,13 @@ def main() -> None:
     )
 
     encoder = PointMAEEncoder(pretrained_ckpt=str(args.encoder_ckpt), freeze=True).to(device)
-    decoder = QueryCompletionDecoder(hidden_dim=384, num_queries=256, num_heads=6, depth=6, output_points=8192).to(device)
+    decoder = QueryCompletionDecoder(
+        hidden_dim=384,
+        num_queries=256,
+        num_heads=6,
+        depth=6,
+        output_points=args.num_complete_points,
+    ).to(device)
     optimizer = torch.optim.AdamW(decoder.parameters(), lr=args.lr, weight_decay=0.05)
 
     decoder.train()

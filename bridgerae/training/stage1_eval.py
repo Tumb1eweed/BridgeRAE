@@ -7,15 +7,18 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from bridgerae.datasets import ShapeNetPointCloudDataset, shapenet_point_collate_fn
+from bridgerae.datasets import build_pointcloud_dataset, resolve_point_counts, shapenet_point_collate_fn
 from bridgerae.models import PointMAEEncoder, QueryCompletionDecoder
 from bridgerae.training.metrics import compute_completion_metrics
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='BridgeRAE stage-1 evaluation')
-    parser.add_argument('--data-root', type=Path, default=Path('/root/autodl-tmp/datasets/ShapeNet55'))
-    parser.add_argument('--pair-data-root', type=Path, default=Path('/root/autodl-tmp/datasets/ShapeNet55_PoinTrPairs'))
+    parser.add_argument('--dataset', type=str, default='shapenet', choices=['shapenet', 'pcn'])
+    parser.add_argument('--data-root', type=Path, default=None)
+    parser.add_argument('--pair-data-root', type=Path, default=None)
+    parser.add_argument('--num-input-points', type=int, default=None)
+    parser.add_argument('--num-complete-points', type=int, default=None)
     parser.add_argument('--split-set', type=str, default=None)
     parser.add_argument('--checkpoint', type=Path, required=True)
     parser.add_argument('--class-id', type=str, default=None)
@@ -29,9 +32,15 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_decoder(checkpoint_path: Path, device: torch.device) -> QueryCompletionDecoder:
+def load_decoder(checkpoint_path: Path, device: torch.device, output_points: int) -> QueryCompletionDecoder:
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
-    decoder = QueryCompletionDecoder(hidden_dim=384, num_queries=256, num_heads=6, depth=6, output_points=8192).to(device)
+    decoder = QueryCompletionDecoder(
+        hidden_dim=384,
+        num_queries=256,
+        num_heads=6,
+        depth=6,
+        output_points=output_points,
+    ).to(device)
     decoder.load_state_dict(checkpoint['decoder'])
     decoder.eval()
     return decoder
@@ -39,18 +48,24 @@ def load_decoder(checkpoint_path: Path, device: torch.device) -> QueryCompletion
 
 def main() -> None:
     args = parse_args()
+    args.num_input_points, args.num_complete_points = resolve_point_counts(
+        args.dataset,
+        args.num_input_points,
+        args.num_complete_points,
+    )
     if not torch.cuda.is_available():
         raise RuntimeError('CUDA is required for stage1_eval.py')
 
     device = torch.device('cuda')
-    dataset = ShapeNetPointCloudDataset(
+    dataset = build_pointcloud_dataset(
+        dataset_name=args.dataset,
         data_root=args.data_root,
-        pair_data_root=args.pair_data_root,
         split=args.split,
-        split_set=args.split_set,
         class_id=args.class_id,
-        num_input_points=2048,
-        num_complete_points=8192,
+        num_input_points=args.num_input_points,
+        num_complete_points=args.num_complete_points,
+        split_set=args.split_set,
+        pair_data_root=args.pair_data_root,
     )
     loader = DataLoader(
         dataset,
@@ -64,7 +79,7 @@ def main() -> None:
     )
 
     encoder = PointMAEEncoder(pretrained_ckpt=str(args.encoder_ckpt), freeze=True).to(device)
-    decoder = load_decoder(args.checkpoint, device=device)
+    decoder = load_decoder(args.checkpoint, device=device, output_points=args.num_complete_points)
 
     totals = {
         'chamfer_distance': 0.0,
@@ -90,7 +105,15 @@ def main() -> None:
                 break
 
     result = {key: value / max(num_batches, 1) for key, value in totals.items()}
-    result.update({'num_batches': num_batches, 'split': args.split, 'split_set': args.split_set, 'class_id': args.class_id or 'all'})
+    result.update({
+        'num_batches': num_batches,
+        'dataset': args.dataset,
+        'num_input_points': args.num_input_points,
+        'num_complete_points': args.num_complete_points,
+        'split': args.split,
+        'split_set': args.split_set,
+        'class_id': args.class_id or 'all',
+    })
     print(json.dumps(result), flush=True)
 
 

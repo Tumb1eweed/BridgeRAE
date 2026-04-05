@@ -7,25 +7,32 @@ import time
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from tqdm.auto import tqdm
 
-from bridgerae.datasets import ShapeNetPointCloudDataset, shapenet_point_collate_fn
-from bridgerae.models import PointMAEEncoder, QueryCompletionDecoder
-from bridgerae.training.losses import chamfer_distance_l2, get_chamfer_backend
+from bridgerae.datasets import build_pointcloud_dataset, resolve_point_counts, shapenet_point_collate_fn
+from bridgerae.models import LatentNormalizer, PointMAEEncoder, QueryCompletionDecoder
+from bridgerae.training.losses import chamfer_distance_l2, get_chamfer_backend, repulsion_loss
 from bridgerae.training.metrics import compute_completion_metrics
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='BridgeRAE stage-1 training')
-    parser.add_argument('--data-root', type=Path, default=Path('/root/autodl-tmp/datasets/ShapeNet55'))
-    parser.add_argument('--pair-data-root', type=Path, default=Path('/root/autodl-tmp/datasets/ShapeNet55_PoinTrPairs'))
+    parser.add_argument('--dataset', type=str, default='shapenet', choices=['shapenet', 'pcn'])
+    parser.add_argument('--data-root', type=Path, default=None)
+    parser.add_argument('--pair-data-root', type=Path, default=None)
+    parser.add_argument('--num-input-points', type=int, default=None)
+    parser.add_argument('--num-complete-points', type=int, default=None)
     parser.add_argument('--train-split-set', type=str, default='ShapeNet-34')
     parser.add_argument('--val-split-set', type=str, default='ShapeNet-34')
     parser.add_argument('--class-id', type=str, default=None)
-    parser.add_argument('--batch-size', type=int, default=256)
+    parser.add_argument('--batch-size', type=int, default=512)
+    parser.add_argument('--val-batch-size', type=int, default=None)
     parser.add_argument('--num-workers', type=int, default=8)
     parser.add_argument('--epochs', type=int, default=20)
+    parser.add_argument('--max-train-samples', type=int, default=None)
+    parser.add_argument('--max-val-samples', type=int, default=None)
+    parser.add_argument('--train-shuffle', action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument('--lr', type=float, default=5e-4)
     parser.add_argument('--weight-decay', type=float, default=5e-2)
     parser.add_argument('--log-every', type=int, default=25)
@@ -38,32 +45,43 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--iou-resolution', type=int, default=32)
     parser.add_argument('--metric-points', type=int, default=2048)
     parser.add_argument('--eval-every', type=int, default=5)
+    parser.add_argument('--latent-normalize', action='store_true', help='Enable channel-wise latent normalization')
+    parser.add_argument('--latent-noise-std', type=float, default=0.0, help='Noise std added to normalized latent during training (0 = disabled)')
+    parser.add_argument('--latent-stats-batches', type=int, default=None, help='Max batches for stats collection (None = full pass)')
+    parser.add_argument('--repulsion-weight', type=float, default=0.0, help='Weight for repulsion loss (0 = disabled)')
+    parser.add_argument('--repulsion-k', type=int, default=8, help='Number of nearest neighbors for repulsion loss')
+    parser.add_argument('--lr-scheduler', type=str, default='cosine', choices=['none', 'cosine'], help='LR scheduler type')
+    parser.add_argument('--warmup-epochs', type=int, default=5, help='Linear warmup epochs before cosine decay')
+    parser.add_argument('--lr-min', type=float, default=1e-6, help='Minimum LR for cosine scheduler')
     return parser.parse_args()
 
 
-def save_checkpoint(path: Path, epoch: int, step: int, decoder: QueryCompletionDecoder, optimizer: torch.optim.Optimizer, args: argparse.Namespace, metrics: dict[str, float]) -> None:
+def save_checkpoint(path: Path, epoch: int, step: int, decoder: QueryCompletionDecoder, optimizer: torch.optim.Optimizer, args: argparse.Namespace, metrics: dict[str, float], normalizer: LatentNormalizer | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            'epoch': epoch,
-            'step': step,
-            'decoder': decoder.state_dict(),
-            'optimizer': optimizer.state_dict(),
-            'args': vars(args),
-            'metrics': metrics,
-        },
-        path,
-    )
+    data = {
+        'epoch': epoch,
+        'step': step,
+        'decoder': decoder.state_dict(),
+        'optimizer': optimizer.state_dict(),
+        'args': vars(args),
+        'metrics': metrics,
+    }
+    if normalizer is not None:
+        data['normalizer'] = normalizer.state_dict()
+    torch.save(data, path)
 
 
 def load_resume_checkpoint(
     checkpoint_path: Path,
     decoder: QueryCompletionDecoder,
     optimizer: torch.optim.Optimizer,
+    normalizer: LatentNormalizer | None = None,
 ) -> tuple[int, int, float]:
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
     decoder.load_state_dict(checkpoint['decoder'])
     optimizer.load_state_dict(checkpoint['optimizer'])
+    if normalizer is not None and 'normalizer' in checkpoint:
+        normalizer.load_state_dict(checkpoint['normalizer'])
     start_epoch = int(checkpoint.get('epoch', -1)) + 1
     global_step = int(checkpoint.get('step', 0))
     metrics = checkpoint.get('metrics', {}) or {}
@@ -71,16 +89,26 @@ def load_resume_checkpoint(
     return start_epoch, global_step, best_val_loss
 
 
-def build_loader(args: argparse.Namespace, split: str, split_set: str, shuffle: bool, batch_size: int) -> DataLoader:
-    dataset = ShapeNetPointCloudDataset(
+def build_loader(
+    args: argparse.Namespace,
+    split: str,
+    split_set: str,
+    shuffle: bool,
+    batch_size: int,
+    max_samples: int | None = None,
+) -> DataLoader:
+    dataset = build_pointcloud_dataset(
+        dataset_name=args.dataset,
         data_root=args.data_root,
-        pair_data_root=args.pair_data_root,
         split=split,
-        split_set=split_set,
         class_id=args.class_id,
-        num_input_points=2048,
-        num_complete_points=8192,
+        num_input_points=args.num_input_points,
+        num_complete_points=args.num_complete_points,
+        split_set=split_set,
+        pair_data_root=args.pair_data_root,
     )
+    if max_samples is not None:
+        dataset = Subset(dataset, range(min(max_samples, len(dataset))))
     return DataLoader(
         dataset,
         batch_size=batch_size,
@@ -101,6 +129,7 @@ def evaluate(
     iou_resolution: int,
     metric_points: int | None,
     max_batches: int | None,
+    normalizer: LatentNormalizer | None = None,
 ) -> dict[str, float]:
     decoder.eval()
     totals = {
@@ -114,10 +143,12 @@ def evaluate(
 
     with torch.no_grad():
         for batch in loader:
-            partial_points = batch['partial_points'].to(device, non_blocking=True)
             complete_points = batch['complete_points'].to(device, non_blocking=True)
-            enc = encoder(partial_points)
-            pred = decoder(enc.tokens, enc.centers).coarse_points
+            enc = encoder(complete_points)
+            tokens = enc.tokens
+            if normalizer is not None:
+                tokens = normalizer.normalize(tokens)
+            pred = decoder(tokens, enc.centers).coarse_points
             loss = chamfer_distance_l2(pred, complete_points)
             metrics = compute_completion_metrics(pred, complete_points, iou_resolution=iou_resolution, metric_points=metric_points)
             totals['val_loss'] += float(loss.item())
@@ -136,16 +167,45 @@ def evaluate(
 
 def main() -> None:
     args = parse_args()
+    args.num_input_points, args.num_complete_points = resolve_point_counts(
+        args.dataset,
+        args.num_input_points,
+        args.num_complete_points,
+    )
     if not torch.cuda.is_available():
         raise RuntimeError('CUDA is required for stage1_train.py')
 
     device = torch.device('cuda')
     args.save_dir.mkdir(parents=True, exist_ok=True)
-    train_loader = build_loader(args, split='train', split_set=args.train_split_set, shuffle=True, batch_size=args.batch_size)
-    val_loader = build_loader(args, split='val', split_set=args.val_split_set, shuffle=False, batch_size=args.batch_size)
+    train_loader = build_loader(
+        args,
+        split='train',
+        split_set=args.train_split_set,
+        shuffle=args.train_shuffle,
+        batch_size=args.batch_size,
+        max_samples=args.max_train_samples,
+    )
+    val_batch_size = args.val_batch_size or args.batch_size
+    val_loader = build_loader(
+        args,
+        split='val',
+        split_set=args.val_split_set,
+        shuffle=False,
+        batch_size=val_batch_size,
+        max_samples=args.max_val_samples,
+    )
 
     encoder = PointMAEEncoder(pretrained_ckpt=str(args.encoder_ckpt), freeze=True).to(device)
-    decoder = QueryCompletionDecoder(hidden_dim=384, num_queries=256, num_heads=6, depth=6, output_points=8192).to(device)
+    decoder = QueryCompletionDecoder(
+        hidden_dim=384,
+        num_queries=256,
+        num_heads=6,
+        depth=6,
+        output_points=args.num_complete_points,
+    ).to(device)
+    normalizer: LatentNormalizer | None = None
+    if args.latent_normalize:
+        normalizer = LatentNormalizer(dim=384).to(device)
     optimizer = torch.optim.AdamW(decoder.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scaler = torch.amp.GradScaler('cuda', enabled=args.amp)
 
@@ -153,24 +213,57 @@ def main() -> None:
     global_step = 0
     best_val_loss = float('inf')
     if args.resume_ckpt is not None:
-        start_epoch, global_step, best_val_loss = load_resume_checkpoint(args.resume_ckpt, decoder, optimizer)
+        start_epoch, global_step, best_val_loss = load_resume_checkpoint(args.resume_ckpt, decoder, optimizer, normalizer)
+
+    if normalizer is not None and not normalizer.is_collected:
+        stats_loader = build_loader(
+            args, split='train', split_set=args.train_split_set,
+            shuffle=False, batch_size=args.batch_size, max_samples=args.max_train_samples,
+        )
+        normalizer.collect_stats(encoder, stats_loader, device, max_batches=args.latent_stats_batches)
+        del stats_loader
+        print(json.dumps({
+            'latent_stats': 'collected',
+            'mean_norm': float(normalizer.mean.norm().item()),
+            'std_mean': float(normalizer.std.mean().item()),
+        }), flush=True)
 
     total_target_epoch = start_epoch + args.epochs
+
+    scheduler = None
+    if args.lr_scheduler == 'cosine':
+        def lr_lambda(epoch_idx: int) -> float:
+            if epoch_idx < args.warmup_epochs:
+                return max((epoch_idx + 1) / max(args.warmup_epochs, 1), args.lr_min / args.lr)
+            progress = (epoch_idx - args.warmup_epochs) / max(total_target_epoch - args.warmup_epochs, 1)
+            cosine = 0.5 * (1.0 + __import__('math').cos(__import__('math').pi * progress))
+            return max(cosine, args.lr_min / args.lr)
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch=start_epoch - 1 if start_epoch > 0 else -1)
+
     meta = {
         'train_size': len(train_loader.dataset),
         'val_size': len(val_loader.dataset),
         'batch_size': args.batch_size,
+        'val_batch_size': val_batch_size,
         'train_steps_per_epoch': len(train_loader),
         'val_steps_per_epoch': len(val_loader),
         'class_id': args.class_id or 'all',
+        'dataset': args.dataset,
+        'num_input_points': args.num_input_points,
+        'num_complete_points': args.num_complete_points,
         'train_split_set': args.train_split_set,
         'val_split_set': args.val_split_set,
+        'max_train_samples': args.max_train_samples,
+        'max_val_samples': args.max_val_samples,
+        'train_shuffle': args.train_shuffle,
         'amp': args.amp,
         'epochs': args.epochs,
         'start_epoch': start_epoch,
         'target_epoch': total_target_epoch,
         'resume_ckpt': str(args.resume_ckpt) if args.resume_ckpt is not None else None,
         'chamfer_backend': get_chamfer_backend(device),
+        'latent_normalize': args.latent_normalize,
+        'latent_noise_std': args.latent_noise_std,
     }
     print(json.dumps(meta), flush=True)
 
@@ -192,16 +285,24 @@ def main() -> None:
             file=sys.stdout,
         )
         for batch_idx, batch in train_iter:
-            partial_points = batch['partial_points'].to(device, non_blocking=True)
             complete_points = batch['complete_points'].to(device, non_blocking=True)
 
             with torch.no_grad():
-                enc = encoder(partial_points)
+                enc = encoder(complete_points)
+                tokens = enc.tokens
+                if normalizer is not None:
+                    tokens = normalizer.normalize(tokens)
+                if args.latent_noise_std > 0:
+                    tokens = tokens + args.latent_noise_std * torch.randn_like(tokens)
 
             optimizer.zero_grad(set_to_none=True)
             with torch.amp.autocast('cuda', enabled=args.amp):
-                dec = decoder(enc.tokens, enc.centers)
-                loss = chamfer_distance_l2(dec.coarse_points, complete_points)
+                dec = decoder(tokens, enc.centers)
+                cd_loss = chamfer_distance_l2(dec.coarse_points, complete_points)
+                loss = cd_loss
+                if args.repulsion_weight > 0:
+                    rep_loss = repulsion_loss(dec.coarse_points, k=args.repulsion_k)
+                    loss = loss + args.repulsion_weight * rep_loss
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -231,11 +332,15 @@ def main() -> None:
                 break
 
         train_loss = running_loss / max(steps_this_epoch, 1)
+        current_lr = optimizer.param_groups[0]['lr']
+        if scheduler is not None:
+            scheduler.step()
         should_eval = ((epoch + 1) % args.eval_every == 0) or ((epoch + 1) == total_target_epoch)
         epoch_time = time.time() - epoch_start
         summary = {
             'epoch': epoch,
             'train_loss': train_loss,
+            'lr': current_lr,
             'epoch_time_sec': round(epoch_time, 2),
             'eval_ran': should_eval,
         }
@@ -248,6 +353,7 @@ def main() -> None:
                 iou_resolution=args.iou_resolution,
                 metric_points=args.metric_points,
                 max_batches=args.max_val_batches,
+                normalizer=normalizer,
             )
             summary.update(val_metrics)
             epoch_bar.set_postfix({
@@ -265,11 +371,11 @@ def main() -> None:
         print(json.dumps(summary), flush=True)
 
         ckpt_path = args.save_dir / f'epoch_{epoch:03d}.pth'
-        save_checkpoint(ckpt_path, epoch=epoch, step=global_step, decoder=decoder, optimizer=optimizer, args=args, metrics=summary)
+        save_checkpoint(ckpt_path, epoch=epoch, step=global_step, decoder=decoder, optimizer=optimizer, args=args, metrics=summary, normalizer=normalizer)
         if should_eval and summary['val_loss'] < best_val_loss:
             best_val_loss = summary['val_loss']
-            save_checkpoint(args.save_dir / 'best.pth', epoch=epoch, step=global_step, decoder=decoder, optimizer=optimizer, args=args, metrics=summary)
-        save_checkpoint(args.save_dir / 'last.pth', epoch=epoch, step=global_step, decoder=decoder, optimizer=optimizer, args=args, metrics=summary)
+            save_checkpoint(args.save_dir / 'best.pth', epoch=epoch, step=global_step, decoder=decoder, optimizer=optimizer, args=args, metrics=summary, normalizer=normalizer)
+        save_checkpoint(args.save_dir / 'last.pth', epoch=epoch, step=global_step, decoder=decoder, optimizer=optimizer, args=args, metrics=summary, normalizer=normalizer)
 
         if args.max_steps is not None and global_step >= args.max_steps:
             break

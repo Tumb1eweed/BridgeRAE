@@ -65,3 +65,28 @@ def get_chamfer_backend(device: torch.device | None = None) -> str:
     if device is not None and device.type != 'cuda':
         return 'torch_cdist_fallback'
     return 'chamfer_extension' if _CHAMFER_AVAILABLE else 'torch_cdist_fallback'
+
+
+def repulsion_loss(pred: torch.Tensor, k: int = 8, eps: float = 1e-6) -> torch.Tensor:
+    """Penalize nearby points to encourage uniform distribution.
+
+    For each point, computes the mean negative squared distance to its k nearest
+    neighbors (excluding itself).  Minimizing this pushes points apart.
+
+    Args:
+        pred: (B, N, 3) predicted point cloud.
+        k: number of nearest neighbors.
+        eps: small constant for numerical stability.
+    """
+    # (B, N, N) pairwise squared distances
+    diff = pred.unsqueeze(2) - pred.unsqueeze(1)  # (B, N, N, 3)
+    dist_sq = (diff * diff).sum(dim=-1)            # (B, N, N)
+    # exclude self (diagonal) by setting to large value
+    diag_mask = torch.eye(pred.shape[1], device=pred.device, dtype=torch.bool).unsqueeze(0)
+    dist_sq = dist_sq.masked_fill(diag_mask, float('inf'))
+    # k nearest neighbors
+    knn_sq, _ = dist_sq.topk(k, dim=-1, largest=False)  # (B, N, k)
+    # weight: closer neighbors get stronger penalty  h(r) = max(0, eps - r)
+    knn_dist = knn_sq.clamp_min(0).sqrt()  # (B, N, k)
+    penalty = (-knn_dist).exp()  # exponential repulsion
+    return penalty.mean()

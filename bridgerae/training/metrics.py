@@ -65,7 +65,7 @@ def compute_completion_metrics(
 ) -> dict[str, float]:
     pred_eval = _uniform_subsample(pred, metric_points)
     target_eval = _uniform_subsample(target, metric_points)
-    cd_l2 = float(chamfer_distance_metric(pred_eval, target_eval).item()) * 100.0
+    cd_l2 = float(chamfer_distance_metric(pred_eval, target_eval).item())
     cd_l1 = float(chamfer_distance_l1_metric(pred_eval, target_eval).item())
     emd = float(earth_mover_distance_metric(pred_eval, target_eval).item())
     iou = float(voxel_iou_metric(pred_eval, target_eval, resolution=iou_resolution).item()) * 100.0
