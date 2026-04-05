@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import time
 from pathlib import Path
 
@@ -270,7 +271,7 @@ def main() -> None:
             if epoch_idx < args.warmup_epochs:
                 return max((epoch_idx + 1) / max(args.warmup_epochs, 1), args.lr_min / args.lr)
             progress = (epoch_idx - args.warmup_epochs) / max(total_target_epoch - args.warmup_epochs, 1)
-            cosine = 0.5 * (1.0 + __import__('math').cos(__import__('math').pi * progress))
+            cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
             return max(cosine, args.lr_min / args.lr)
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch=start_epoch - 1 if start_epoch > 0 else -1)
 
@@ -415,6 +416,8 @@ def main() -> None:
         }
         if decoder_trainable_params:
             ckpt['decoder'] = decoder.state_dict()
+        if normalizer is not None:
+            ckpt['normalizer'] = normalizer.state_dict()
 
         torch.save(ckpt, args.save_dir / f'epoch_{epoch:03d}.pth')
         torch.save(ckpt, args.save_dir / 'last.pth')

@@ -42,7 +42,7 @@ decoder:
   output_points: 8192
 
 loss:
-  chamfer: l1
+  chamfer: l2
   repulsion_weight: 0.0
   partial_preserve_weight: 0.0
 
@@ -57,6 +57,5 @@ training:
 
 evaluation:
   metrics:
-    - cd_l1
     - cd_l2
     - f_score

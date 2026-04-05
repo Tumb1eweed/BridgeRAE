@@ -88,7 +88,6 @@ def main() -> None:
 
     totals = {
         'chamfer_distance': 0.0,
-        'chamfer_distance_l1': 0.0,
         'emd': 0.0,
         'iou': 0.0,
     }

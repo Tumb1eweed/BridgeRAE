@@ -48,6 +48,16 @@ def earth_mover_distance_metric(pred: torch.Tensor, target: torch.Tensor) -> tor
 
 
 @torch.no_grad()
+def f1_score_metric(pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.01) -> torch.Tensor:
+    dist = torch.cdist(pred, target, p=2)
+    pred_to_target = dist.min(dim=2)[0]
+    target_to_pred = dist.min(dim=1)[0]
+    precision = (pred_to_target <= threshold).float().mean(dim=1)
+    recall = (target_to_pred <= threshold).float().mean(dim=1)
+    return (2.0 * precision * recall / (precision + recall).clamp_min(1e-8)).mean()
+
+
+@torch.no_grad()
 def voxel_iou_metric(pred: torch.Tensor, target: torch.Tensor, resolution: int = 32) -> torch.Tensor:
     pred_occ = _points_to_occupancy(pred, resolution)
     target_occ = _points_to_occupancy(target, resolution)
@@ -62,17 +72,20 @@ def compute_completion_metrics(
     target: torch.Tensor,
     iou_resolution: int = 32,
     metric_points: int | None = 2048,
+    f1_threshold: float = 0.01,
 ) -> dict[str, float]:
     pred_eval = _uniform_subsample(pred, metric_points)
     target_eval = _uniform_subsample(target, metric_points)
     cd_l2 = float(chamfer_distance_metric(pred_eval, target_eval).item())
     cd_l1 = float(chamfer_distance_l1_metric(pred_eval, target_eval).item())
     emd = float(earth_mover_distance_metric(pred_eval, target_eval).item())
+    f1 = float(f1_score_metric(pred_eval, target_eval, threshold=f1_threshold).item()) * 100.0
     iou = float(voxel_iou_metric(pred_eval, target_eval, resolution=iou_resolution).item()) * 100.0
     return {
         'chamfer_distance': cd_l2,
         'chamfer_distance_l1': cd_l1,
         'emd': emd,
+        'f1_1pct': f1,
         'iou': iou,
     }
 

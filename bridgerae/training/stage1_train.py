@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -135,7 +136,6 @@ def evaluate(
     totals = {
         'val_loss': 0.0,
         'val_chamfer_distance': 0.0,
-        'val_chamfer_distance_l1': 0.0,
         'val_emd': 0.0,
         'val_iou': 0.0,
     }
@@ -153,7 +153,6 @@ def evaluate(
             metrics = compute_completion_metrics(pred, complete_points, iou_resolution=iou_resolution, metric_points=metric_points)
             totals['val_loss'] += float(loss.item())
             totals['val_chamfer_distance'] += metrics['chamfer_distance']
-            totals['val_chamfer_distance_l1'] += metrics['chamfer_distance_l1']
             totals['val_emd'] += metrics['emd']
             totals['val_iou'] += metrics['iou']
             num_batches += 1
@@ -236,7 +235,7 @@ def main() -> None:
             if epoch_idx < args.warmup_epochs:
                 return max((epoch_idx + 1) / max(args.warmup_epochs, 1), args.lr_min / args.lr)
             progress = (epoch_idx - args.warmup_epochs) / max(total_target_epoch - args.warmup_epochs, 1)
-            cosine = 0.5 * (1.0 + __import__('math').cos(__import__('math').pi * progress))
+            cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
             return max(cosine, args.lr_min / args.lr)
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch=start_epoch - 1 if start_epoch > 0 else -1)
 
