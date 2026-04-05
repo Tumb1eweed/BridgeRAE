@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from bridgerae.datasets import build_pointcloud_dataset, resolve_point_counts, shapenet_point_collate_fn
-from bridgerae.models import PointMAEEncoder, QueryCompletionDecoder
+from bridgerae.models import LatentNormalizer, PointMAEEncoder, QueryCompletionDecoder
 from bridgerae.training.losses import chamfer_distance_l2
 from bridgerae.training.metrics import compute_completion_metrics
 
@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_decoder_state(checkpoint_path: Path, device: torch.device, output_points: int) -> tuple[QueryCompletionDecoder, dict]:
+def load_decoder_state(checkpoint_path: Path, device: torch.device, output_points: int) -> tuple[QueryCompletionDecoder, LatentNormalizer | None, dict]:
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
     decoder = QueryCompletionDecoder(
         hidden_dim=384,
@@ -45,7 +45,12 @@ def load_decoder_state(checkpoint_path: Path, device: torch.device, output_point
     ).to(device)
     decoder.load_state_dict(checkpoint['decoder'])
     decoder.eval()
-    return decoder, checkpoint
+    normalizer: LatentNormalizer | None = None
+    if 'normalizer' in checkpoint:
+        normalizer = LatentNormalizer(dim=384).to(device)
+        normalizer.load_state_dict(checkpoint['normalizer'])
+        normalizer.eval()
+    return decoder, normalizer, checkpoint
 
 
 def evaluate_checkpoint(
@@ -58,7 +63,7 @@ def evaluate_checkpoint(
     max_batches: int | None,
     output_points: int,
 ) -> dict[str, float]:
-    decoder, checkpoint = load_decoder_state(checkpoint_path, device, output_points)
+    decoder, normalizer, checkpoint = load_decoder_state(checkpoint_path, device, output_points)
     totals = {
         'eval_loss': 0.0,
         'eval_chamfer_distance': 0.0,
@@ -70,10 +75,12 @@ def evaluate_checkpoint(
 
     with torch.no_grad():
         for batch in loader:
-            partial_points = batch['partial_points'].to(device, non_blocking=True)
             complete_points = batch['complete_points'].to(device, non_blocking=True)
-            enc = encoder(partial_points)
-            pred = decoder(enc.tokens, enc.centers).coarse_points
+            enc = encoder(complete_points)
+            tokens = enc.tokens
+            if normalizer is not None:
+                tokens = normalizer.normalize(tokens)
+            pred = decoder(tokens, enc.centers).coarse_points
             loss = chamfer_distance_l2(pred, complete_points)
             metrics = compute_completion_metrics(pred, complete_points, iou_resolution=iou_resolution, metric_points=metric_points)
             totals['eval_loss'] += float(loss.item())

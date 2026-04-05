@@ -74,11 +74,10 @@ def main() -> None:
     step = 0
     while step < args.steps:
         for batch in loader:
-            partial_points = batch['partial_points'].to(device)
             complete_points = batch['complete_points'].to(device)
 
             with torch.no_grad():
-                enc = encoder(partial_points)
+                enc = encoder(complete_points)
             dec = decoder(enc.tokens, enc.centers)
             loss = chamfer_distance_l2(dec.coarse_points, complete_points)
 
@@ -88,8 +87,7 @@ def main() -> None:
 
             print({
                 'step': step,
-                'batch_size': int(partial_points.shape[0]),
-                'partial_shape': tuple(partial_points.shape),
+                'batch_size': int(complete_points.shape[0]),
                 'complete_shape': tuple(complete_points.shape),
                 'pred_shape': tuple(dec.coarse_points.shape),
                 'loss': float(loss.item()),

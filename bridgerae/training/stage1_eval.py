@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from bridgerae.datasets import build_pointcloud_dataset, resolve_point_counts, shapenet_point_collate_fn
-from bridgerae.models import PointMAEEncoder, QueryCompletionDecoder
+from bridgerae.models import LatentNormalizer, PointMAEEncoder, QueryCompletionDecoder
 from bridgerae.training.metrics import compute_completion_metrics
 
 
@@ -32,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_decoder(checkpoint_path: Path, device: torch.device, output_points: int) -> QueryCompletionDecoder:
+def load_decoder(checkpoint_path: Path, device: torch.device, output_points: int) -> tuple[QueryCompletionDecoder, LatentNormalizer | None]:
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
     decoder = QueryCompletionDecoder(
         hidden_dim=384,
@@ -43,7 +43,12 @@ def load_decoder(checkpoint_path: Path, device: torch.device, output_points: int
     ).to(device)
     decoder.load_state_dict(checkpoint['decoder'])
     decoder.eval()
-    return decoder
+    normalizer: LatentNormalizer | None = None
+    if 'normalizer' in checkpoint:
+        normalizer = LatentNormalizer(dim=384).to(device)
+        normalizer.load_state_dict(checkpoint['normalizer'])
+        normalizer.eval()
+    return decoder, normalizer
 
 
 def main() -> None:
@@ -79,7 +84,7 @@ def main() -> None:
     )
 
     encoder = PointMAEEncoder(pretrained_ckpt=str(args.encoder_ckpt), freeze=True).to(device)
-    decoder = load_decoder(args.checkpoint, device=device, output_points=args.num_complete_points)
+    decoder, normalizer = load_decoder(args.checkpoint, device=device, output_points=args.num_complete_points)
 
     totals = {
         'chamfer_distance': 0.0,
@@ -91,10 +96,12 @@ def main() -> None:
 
     with torch.no_grad():
         for batch_idx, batch in enumerate(loader):
-            partial_points = batch['partial_points'].to(device, non_blocking=True)
             complete_points = batch['complete_points'].to(device, non_blocking=True)
-            enc = encoder(partial_points)
-            pred = decoder(enc.tokens, enc.centers).coarse_points
+            enc = encoder(complete_points)
+            tokens = enc.tokens
+            if normalizer is not None:
+                tokens = normalizer.normalize(tokens)
+            pred = decoder(tokens, enc.centers).coarse_points
             metrics = compute_completion_metrics(pred, complete_points, iou_resolution=args.iou_resolution, metric_points=args.metric_points)
             for key, value in metrics.items():
                 totals[key] += value

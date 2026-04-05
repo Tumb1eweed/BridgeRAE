@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from bridgerae.datasets import build_pointcloud_dataset, resolve_point_counts, shapenet_point_collate_fn
-from bridgerae.models import LatentTransportModel, PointMAEEncoder, QueryCompletionDecoder
+from bridgerae.models import LatentNormalizer, LatentTransportModel, PointMAEEncoder, QueryCompletionDecoder
 from bridgerae.training.losses import chamfer_distance_l2
 from bridgerae.training.metrics import compute_completion_metrics
 
@@ -50,7 +50,7 @@ def load_transport_and_decoder(
     stage1_checkpoint_path: Path | None,
     device: torch.device,
     output_points: int,
-) -> tuple[LatentTransportModel, QueryCompletionDecoder, str]:
+) -> tuple[LatentTransportModel, QueryCompletionDecoder, LatentNormalizer | None, str]:
     stage2_checkpoint = torch.load(stage2_checkpoint_path, map_location='cpu')
 
     transport = LatentTransportModel(hidden_dim=384, depth=6, num_heads=6).to(device)
@@ -59,8 +59,13 @@ def load_transport_and_decoder(
 
     decoder = _build_decoder(device, output_points)
     decoder_source = 'stage2'
+    normalizer: LatentNormalizer | None = None
     if 'decoder' in stage2_checkpoint:
         decoder.load_state_dict(stage2_checkpoint['decoder'])
+        if 'normalizer' in stage2_checkpoint:
+            normalizer = LatentNormalizer(dim=384).to(device)
+            normalizer.load_state_dict(stage2_checkpoint['normalizer'])
+            normalizer.eval()
     else:
         if stage1_checkpoint_path is None:
             raise ValueError(
@@ -69,9 +74,13 @@ def load_transport_and_decoder(
         stage1_checkpoint = torch.load(stage1_checkpoint_path, map_location='cpu')
         decoder.load_state_dict(stage1_checkpoint['decoder'])
         decoder_source = 'stage1'
+        if 'normalizer' in stage1_checkpoint:
+            normalizer = LatentNormalizer(dim=384).to(device)
+            normalizer.load_state_dict(stage1_checkpoint['normalizer'])
+            normalizer.eval()
     decoder.eval()
 
-    return transport, decoder, decoder_source
+    return transport, decoder, normalizer, decoder_source
 
 
 def main() -> None:
@@ -107,7 +116,7 @@ def main() -> None:
     )
 
     encoder = PointMAEEncoder(pretrained_ckpt=str(args.encoder_ckpt), freeze=True).to(device)
-    transport, decoder, decoder_source = load_transport_and_decoder(
+    transport, decoder, normalizer, decoder_source = load_transport_and_decoder(
         args.stage2_ckpt,
         args.stage1_ckpt,
         device,
@@ -141,8 +150,10 @@ def main() -> None:
             partial_points = batch['partial_points'].to(device, non_blocking=True)
             complete_points = batch['complete_points'].to(device, non_blocking=True)
             src = encoder(partial_points)
-            pred_tokens = transport.transport(src.tokens, src.centers, num_steps=args.transport_steps)
-            pred_points = decoder(pred_tokens, src.centers).coarse_points
+            src_tokens = normalizer.normalize(src.tokens) if normalizer is not None else src.tokens
+            pred_tokens = transport.transport(src_tokens, src.centers, num_steps=args.transport_steps)
+            pred_tokens_dec = normalizer.denormalize(pred_tokens) if normalizer is not None else pred_tokens
+            pred_points = decoder(pred_tokens_dec, src.centers).coarse_points
             loss = chamfer_distance_l2(pred_points, complete_points)
             metrics = compute_completion_metrics(pred_points, complete_points, iou_resolution=args.iou_resolution, metric_points=args.metric_points)
             totals['loss'] += float(loss.item())
