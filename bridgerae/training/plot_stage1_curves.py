@@ -8,7 +8,7 @@ import torch
 
 
 LOSS_KEYS = ['train_loss', 'val_loss']
-VAL_METRIC_KEYS = ['val_chamfer_distance', 'val_emd']
+VAL_METRIC_KEYS = ['val_chamfer_distance', 'val_emd', 'val_f1_1pct']
 
 
 def parse_args() -> argparse.Namespace:

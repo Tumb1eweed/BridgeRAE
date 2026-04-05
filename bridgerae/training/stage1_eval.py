@@ -89,6 +89,7 @@ def main() -> None:
     totals = {
         'chamfer_distance': 0.0,
         'emd': 0.0,
+        'f1_1pct': 0.0,
         'iou': 0.0,
     }
     num_batches = 0

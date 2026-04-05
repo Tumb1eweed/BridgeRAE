@@ -8,12 +8,13 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from tqdm.auto import tqdm
 
 from bridgerae.datasets import build_pointcloud_dataset, resolve_point_counts, shapenet_point_collate_fn
 from bridgerae.models import LatentNormalizer, LatentTransportModel, PointMAEEncoder, QueryCompletionDecoder
 from bridgerae.training.losses import chamfer_distance_l2, get_chamfer_backend
+from bridgerae.training.metrics import compute_completion_metrics
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,6 +33,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--batch-size', type=int, default=64)
     parser.add_argument('--num-workers', type=int, default=8)
     parser.add_argument('--epochs', type=int, default=20)
+    parser.add_argument('--max-train-samples', type=int, default=None)
+    parser.add_argument('--max-val-samples', type=int, default=None)
     parser.add_argument('--lr', type=float, default=2e-4)
     parser.add_argument('--weight-decay', type=float, default=5e-2)
     parser.add_argument('--log-every', type=int, default=25)
@@ -49,7 +52,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument('--transport-steps', type=int, default=8)
 
-    parser.add_argument('--decoder-train-mode', type=str, default='none', choices=['none', 'last_n', 'all'])
+    parser.add_argument('--decoder-train-mode', type=str, default='last_n', choices=['none', 'last_n', 'all'])
     parser.add_argument('--decoder-train-last-n', type=int, default=2)
     parser.add_argument('--decoder-lr-mult', type=float, default=0.1)
 
@@ -58,13 +61,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--max-steps', type=int, default=None)
     parser.add_argument('--max-val-batches', type=int, default=None)
     parser.add_argument('--eval-every', type=int, default=5)
+    parser.add_argument('--iou-resolution', type=int, default=32)
+    parser.add_argument('--metric-points', type=int, default=2048)
     parser.add_argument('--lr-scheduler', type=str, default='cosine', choices=['none', 'cosine'], help='LR scheduler type')
     parser.add_argument('--warmup-epochs', type=int, default=5, help='Linear warmup epochs before cosine decay')
     parser.add_argument('--lr-min', type=float, default=1e-6, help='Minimum LR for cosine scheduler')
+    parser.add_argument('--save-epoch-checkpoints', action=argparse.BooleanOptionalAction, default=True)
     return parser.parse_args()
 
 
-def build_loader(args: argparse.Namespace, split: str, split_set: str, shuffle: bool, batch_size: int) -> DataLoader:
+def build_loader(
+    args: argparse.Namespace,
+    split: str,
+    split_set: str,
+    shuffle: bool,
+    batch_size: int,
+    max_samples: int | None = None,
+) -> DataLoader:
     dataset = build_pointcloud_dataset(
         dataset_name=args.dataset,
         data_root=args.data_root,
@@ -75,6 +88,8 @@ def build_loader(args: argparse.Namespace, split: str, split_set: str, shuffle: 
         split_set=split_set,
         pair_data_root=args.pair_data_root,
     )
+    if max_samples is not None:
+        dataset = Subset(dataset, range(min(max_samples, len(dataset))))
     return DataLoader(
         dataset,
         batch_size=batch_size,
@@ -193,10 +208,21 @@ def evaluate(
     max_batches: int | None,
     flow_weight: float,
     recon_weight: float,
+    iou_resolution: int,
+    metric_points: int | None,
     normalizer: LatentNormalizer | None = None,
 ) -> dict[str, float]:
     transport.eval()
-    totals = {'val_total_loss': 0.0, 'val_flow_loss': 0.0, 'val_recon_loss': 0.0}
+    totals = {
+        'val_total_loss': 0.0,
+        'val_flow_loss': 0.0,
+        'val_recon_loss': 0.0,
+        'val_chamfer_distance': 0.0,
+        'val_chamfer_distance_l1': 0.0,
+        'val_emd': 0.0,
+        'val_f1_1pct': 0.0,
+        'val_iou': 0.0,
+    }
     num_batches = 0
     with torch.no_grad():
         for batch in loader:
@@ -213,9 +239,20 @@ def evaluate(
             pred_tokens_dec = normalizer.denormalize(pred_tokens) if normalizer is not None else pred_tokens
             pred_points = decoder(pred_tokens_dec, src.centers).coarse_points
             recon_loss = chamfer_distance_l2(pred_points, complete_points)
+            metrics = compute_completion_metrics(
+                pred_points,
+                complete_points,
+                iou_resolution=iou_resolution,
+                metric_points=metric_points,
+            )
             totals['val_flow_loss'] += float(flow_loss.item())
             totals['val_recon_loss'] += float(recon_loss.item())
             totals['val_total_loss'] += float((flow_weight * flow_loss + recon_weight * recon_loss).item())
+            totals['val_chamfer_distance'] += metrics['chamfer_distance']
+            totals['val_chamfer_distance_l1'] += metrics['chamfer_distance_l1']
+            totals['val_emd'] += metrics['emd']
+            totals['val_f1_1pct'] += metrics['f1_1pct']
+            totals['val_iou'] += metrics['iou']
             num_batches += 1
             if max_batches is not None and num_batches >= max_batches:
                 break
@@ -240,8 +277,22 @@ def main() -> None:
         raise RuntimeError('CUDA is required for stage2_train.py')
     device = torch.device('cuda')
     args.save_dir.mkdir(parents=True, exist_ok=True)
-    train_loader = build_loader(args, split='train', split_set=args.train_split_set, shuffle=True, batch_size=args.batch_size)
-    val_loader = build_loader(args, split='val', split_set=args.val_split_set, shuffle=False, batch_size=args.batch_size)
+    train_loader = build_loader(
+        args,
+        split='train',
+        split_set=args.train_split_set,
+        shuffle=True,
+        batch_size=args.batch_size,
+        max_samples=args.max_train_samples,
+    )
+    val_loader = build_loader(
+        args,
+        split='val',
+        split_set=args.val_split_set,
+        shuffle=False,
+        batch_size=args.batch_size,
+        max_samples=args.max_val_samples,
+    )
 
     encoder = PointMAEEncoder(pretrained_ckpt=str(args.encoder_ckpt), freeze=True).to(device)
     decoder, normalizer = load_frozen_decoder(args.stage1_ckpt, device, output_points=args.num_complete_points)
@@ -281,6 +332,8 @@ def main() -> None:
         'batch_size': args.batch_size,
         'train_steps_per_epoch': len(train_loader),
         'val_steps_per_epoch': len(val_loader),
+        'max_train_samples': args.max_train_samples,
+        'max_val_samples': args.max_val_samples,
         'epochs': args.epochs,
         'start_epoch': start_epoch,
         'target_epoch': total_target_epoch,
@@ -390,6 +443,8 @@ def main() -> None:
                 args.max_val_batches,
                 flow_weight=flow_weight,
                 recon_weight=args.recon_weight,
+                iou_resolution=args.iou_resolution,
+                metric_points=args.metric_points,
                 normalizer=normalizer,
             )
             summary.update(val_metrics)
@@ -397,6 +452,8 @@ def main() -> None:
                 'train_total': f"{summary['train_total_loss']:.4f}",
                 'val_total': f"{summary['val_total_loss']:.4f}",
                 'val_recon': f"{summary['val_recon_loss']:.4f}",
+                'val_emd': f"{summary['val_emd']:.4f}",
+                'val_f1@1%': f"{summary['val_f1_1pct']:.2f}",
             })
         else:
             epoch_bar.set_postfix({
@@ -419,7 +476,8 @@ def main() -> None:
         if normalizer is not None:
             ckpt['normalizer'] = normalizer.state_dict()
 
-        torch.save(ckpt, args.save_dir / f'epoch_{epoch:03d}.pth')
+        if args.save_epoch_checkpoints:
+            torch.save(ckpt, args.save_dir / f'epoch_{epoch:03d}.pth')
         torch.save(ckpt, args.save_dir / 'last.pth')
         if should_eval and summary[args.best_metric] < best_val:
             best_val = summary[args.best_metric]

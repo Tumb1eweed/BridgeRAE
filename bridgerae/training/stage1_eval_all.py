@@ -67,7 +67,9 @@ def evaluate_checkpoint(
     totals = {
         'eval_loss': 0.0,
         'eval_chamfer_distance': 0.0,
+        'eval_chamfer_distance_l1': 0.0,
         'eval_emd': 0.0,
+        'eval_f1_1pct': 0.0,
         'eval_iou': 0.0,
     }
     num_batches = 0
@@ -84,7 +86,9 @@ def evaluate_checkpoint(
             metrics = compute_completion_metrics(pred, complete_points, iou_resolution=iou_resolution, metric_points=metric_points)
             totals['eval_loss'] += float(loss.item())
             totals['eval_chamfer_distance'] += metrics['chamfer_distance']
+            totals['eval_chamfer_distance_l1'] += metrics['chamfer_distance_l1']
             totals['eval_emd'] += metrics['emd']
+            totals['eval_f1_1pct'] += metrics['f1_1pct']
             totals['eval_iou'] += metrics['iou']
             num_batches += 1
             if max_batches is not None and num_batches >= max_batches:

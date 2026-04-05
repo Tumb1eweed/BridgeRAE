@@ -47,13 +47,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--metric-points', type=int, default=2048)
     parser.add_argument('--eval-every', type=int, default=5)
     parser.add_argument('--latent-normalize', action='store_true', help='Enable channel-wise latent normalization')
-    parser.add_argument('--latent-noise-std', type=float, default=0.0, help='Noise std added to normalized latent during training (0 = disabled)')
+    parser.add_argument('--latent-noise-std', type=float, default=0.1, help='Noise std added to normalized latent during training (0 = disabled)')
     parser.add_argument('--latent-stats-batches', type=int, default=None, help='Max batches for stats collection (None = full pass)')
     parser.add_argument('--repulsion-weight', type=float, default=0.0, help='Weight for repulsion loss (0 = disabled)')
     parser.add_argument('--repulsion-k', type=int, default=8, help='Number of nearest neighbors for repulsion loss')
     parser.add_argument('--lr-scheduler', type=str, default='cosine', choices=['none', 'cosine'], help='LR scheduler type')
     parser.add_argument('--warmup-epochs', type=int, default=5, help='Linear warmup epochs before cosine decay')
     parser.add_argument('--lr-min', type=float, default=1e-6, help='Minimum LR for cosine scheduler')
+    parser.add_argument('--save-epoch-checkpoints', action=argparse.BooleanOptionalAction, default=True)
     return parser.parse_args()
 
 
@@ -136,7 +137,9 @@ def evaluate(
     totals = {
         'val_loss': 0.0,
         'val_chamfer_distance': 0.0,
+        'val_chamfer_distance_l1': 0.0,
         'val_emd': 0.0,
+        'val_f1_1pct': 0.0,
         'val_iou': 0.0,
     }
     num_batches = 0
@@ -153,7 +156,9 @@ def evaluate(
             metrics = compute_completion_metrics(pred, complete_points, iou_resolution=iou_resolution, metric_points=metric_points)
             totals['val_loss'] += float(loss.item())
             totals['val_chamfer_distance'] += metrics['chamfer_distance']
+            totals['val_chamfer_distance_l1'] += metrics['chamfer_distance_l1']
             totals['val_emd'] += metrics['emd']
+            totals['val_f1_1pct'] += metrics['f1_1pct']
             totals['val_iou'] += metrics['iou']
             num_batches += 1
             if max_batches is not None and num_batches >= max_batches:
@@ -359,6 +364,7 @@ def main() -> None:
                 'train_loss': f'{train_loss:.4f}',
                 'val_loss': f"{val_metrics['val_loss']:.4f}",
                 'val_emd': f"{val_metrics['val_emd']:.4f}",
+                'val_f1@1%': f"{val_metrics['val_f1_1pct']:.2f}",
                 'val_iou': f"{val_metrics['val_iou']:.4f}",
             })
         else:
@@ -369,8 +375,9 @@ def main() -> None:
 
         print(json.dumps(summary), flush=True)
 
-        ckpt_path = args.save_dir / f'epoch_{epoch:03d}.pth'
-        save_checkpoint(ckpt_path, epoch=epoch, step=global_step, decoder=decoder, optimizer=optimizer, args=args, metrics=summary, normalizer=normalizer)
+        if args.save_epoch_checkpoints:
+            ckpt_path = args.save_dir / f'epoch_{epoch:03d}.pth'
+            save_checkpoint(ckpt_path, epoch=epoch, step=global_step, decoder=decoder, optimizer=optimizer, args=args, metrics=summary, normalizer=normalizer)
         if should_eval and summary['val_loss'] < best_val_loss:
             best_val_loss = summary['val_loss']
             save_checkpoint(args.save_dir / 'best.pth', epoch=epoch, step=global_step, decoder=decoder, optimizer=optimizer, args=args, metrics=summary, normalizer=normalizer)

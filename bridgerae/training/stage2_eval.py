@@ -139,7 +139,9 @@ def main() -> None:
     totals = {
         'loss': 0.0,
         'chamfer_distance': 0.0,
+        'chamfer_distance_l1': 0.0,
         'emd': 0.0,
+        'f1_1pct': 0.0,
         'iou': 0.0,
     }
     num_batches = 0
@@ -156,7 +158,7 @@ def main() -> None:
             loss = chamfer_distance_l2(pred_points, complete_points)
             metrics = compute_completion_metrics(pred_points, complete_points, iou_resolution=args.iou_resolution, metric_points=args.metric_points)
             totals['loss'] += float(loss.item())
-            for key in ('chamfer_distance', 'emd', 'iou'):
+            for key in ('chamfer_distance', 'chamfer_distance_l1', 'emd', 'f1_1pct', 'iou'):
                 totals[key] += metrics[key]
             num_batches += 1
             print(json.dumps({'batch_idx': batch_idx, 'loss': float(loss.item()), **metrics}), flush=True)

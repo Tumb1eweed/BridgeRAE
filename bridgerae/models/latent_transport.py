@@ -92,6 +92,9 @@ class LatentTransportModel(nn.Module):
             elif isinstance(module, nn.LayerNorm):
                 nn.init.constant_(module.bias, 0)
                 nn.init.constant_(module.weight, 1.0)
+        # Zero-init velocity head so transport starts as identity (v≈0)
+        nn.init.zeros_(self.velocity_head.weight)
+        nn.init.zeros_(self.velocity_head.bias)
 
     def forward(
         self,
