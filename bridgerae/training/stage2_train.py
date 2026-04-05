@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--stage1-ckpt', type=Path, required=True)
     parser.add_argument('--encoder-ckpt', type=Path, default=Path('/root/autodl-tmp/projects/Point-MAE/checkpoint/pretrain.pth'))
     parser.add_argument('--resume-ckpt', type=Path, default=None)
-    parser.add_argument('--batch-size', type=int, default=64)
+    parser.add_argument('--batch-size', type=int, default=128)
     parser.add_argument('--num-workers', type=int, default=8)
     parser.add_argument('--epochs', type=int, default=20)
     parser.add_argument('--max-train-samples', type=int, default=None)

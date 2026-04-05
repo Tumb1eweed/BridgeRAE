@@ -27,7 +27,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--train-split-set', type=str, default='ShapeNet-34')
     parser.add_argument('--val-split-set', type=str, default='ShapeNet-34')
     parser.add_argument('--class-id', type=str, default=None)
-    parser.add_argument('--batch-size', type=int, default=512)
+    parser.add_argument('--batch-size', type=int, default=256)
     parser.add_argument('--val-batch-size', type=int, default=None)
     parser.add_argument('--num-workers', type=int, default=8)
     parser.add_argument('--epochs', type=int, default=20)

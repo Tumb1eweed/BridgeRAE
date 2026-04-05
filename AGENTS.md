@@ -46,3 +46,14 @@
 
 - **LR Scheduler:** Both stages support `--lr-scheduler cosine` (default) with `--warmup-epochs` (default 5) and `--lr-min` (default 1e-6). Use `--lr-scheduler none` for constant LR.
 - **Repulsion Loss:** Stage-1 supports `--repulsion-weight` (default 0) and `--repulsion-k` (default 8) to penalize point clustering.
+
+## Default Training Recipe
+
+- Default PCN recipe should use `--latent-normalize` for stage-1.
+- Default stage-1 batch size should be `256` unless a run explicitly overrides it.
+- Default stage-1 recipe should use latent noise augmentation with `--latent-noise-std 0.1`.
+- Default transport recipe should use the zero-init transport head in `bridgerae/models/latent_transport.py`, so stage-2 starts close to identity and learns residual corrections.
+- Default stage-2 recipe should jointly fine-tune the decoder tail with `--decoder-train-mode last_n` and keep `--decoder-train-last-n 2` unless a run explicitly overrides it.
+- Default stage-2 batch size should be `128` unless a run explicitly overrides it.
+- For long runs, prefer `--no-save-epoch-checkpoints` and keep only `best.pth` / `last.pth` plus logs and exported CSV/JSON/PNG artifacts to avoid filling `/root/autodl-tmp`.
+- For comparison experiments, always record both stage train curves and val curves, and include at least `loss`, `CD-L2`, `F1@1%`, and `IOU`. Include `EMD` when runtime permits.
