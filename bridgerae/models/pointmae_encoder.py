@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from pointnet2_ops import pointnet2_utils
 from timm.models.layers import DropPath, trunc_normal_
 
@@ -121,9 +122,9 @@ class Attention(nn.Module):
         batch_size, num_tokens, dim = x.shape
         qkv = self.qkv(x).reshape(batch_size, num_tokens, 3, self.num_heads, dim // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = self.attn_drop(attn.softmax(dim=-1))
-        x = (attn @ v).transpose(1, 2).reshape(batch_size, num_tokens, dim)
+        drop_p = self.attn_drop.p if self.training else 0.0
+        x = F.scaled_dot_product_attention(q, k, v, dropout_p=drop_p)
+        x = x.transpose(1, 2).reshape(batch_size, num_tokens, dim)
         x = self.proj_drop(self.proj(x))
         return x
 

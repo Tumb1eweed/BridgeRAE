@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from timm.models.layers import trunc_normal_
 
 
@@ -32,9 +33,9 @@ class CrossAttention(nn.Module):
         q = self.q(query).reshape(bsz, nq, self.num_heads, dim // self.num_heads).permute(0, 2, 1, 3)
         k = self.k(context).reshape(bsz, nk, self.num_heads, dim // self.num_heads).permute(0, 2, 1, 3)
         v = self.v(context).reshape(bsz, nk, self.num_heads, dim // self.num_heads).permute(0, 2, 1, 3)
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = self.attn_drop(attn.softmax(dim=-1))
-        x = (attn @ v).transpose(1, 2).reshape(bsz, nq, dim)
+        drop_p = self.attn_drop.p if self.training else 0.0
+        x = F.scaled_dot_product_attention(q, k, v, dropout_p=drop_p)
+        x = x.transpose(1, 2).reshape(bsz, nq, dim)
         return self.proj_drop(self.proj(x))
 
 
@@ -53,9 +54,9 @@ class SelfAttention(nn.Module):
         bsz, ntok, dim = x.shape
         qkv = self.qkv(x).reshape(bsz, ntok, 3, self.num_heads, dim // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = self.attn_drop(attn.softmax(dim=-1))
-        x = (attn @ v).transpose(1, 2).reshape(bsz, ntok, dim)
+        drop_p = self.attn_drop.p if self.training else 0.0
+        x = F.scaled_dot_product_attention(q, k, v, dropout_p=drop_p)
+        x = x.transpose(1, 2).reshape(bsz, ntok, dim)
         return self.proj_drop(self.proj(x))
 
 

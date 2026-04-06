@@ -32,6 +32,7 @@
 - Stage-1 supports `--latent-normalize` to enable channel-wise latent normalization (RAE recipe).
 - Stage-1 supports `--latent-noise-std` (e.g. `0.1`) to add Gaussian noise to normalized latents during training; improves decoder robustness for stage-2.
 - `--latent-stats-batches` controls how many batches are used for stats collection (default: full training set).
+- Stage-1 should cache collected latent stats to disk, keyed by dataset, class, split set, complete point count, and encoder checkpoint, so later runs can reuse them without re-collecting.
 - Normalizer state is saved inside stage-1 checkpoints under key `normalizer`.
 - Stage-2 automatically loads the normalizer from the stage-1 checkpoint if present; no extra flags needed.
 - Data flow with normalizer: `encoder → normalize → (noise, train only) → decoder` (stage-1), `encoder → normalize → transport → denormalize → decoder` (stage-2).
@@ -50,10 +51,12 @@
 ## Default Training Recipe
 
 - Default PCN recipe should use `--latent-normalize` for stage-1.
-- Default stage-1 batch size should be `256` unless a run explicitly overrides it.
+- Default stage-1 batch size should be `384` unless a run explicitly overrides it.
 - Default stage-1 recipe should use latent noise augmentation with `--latent-noise-std 0.1`.
 - Default transport recipe should use the zero-init transport head in `bridgerae/models/latent_transport.py`, so stage-2 starts close to identity and learns residual corrections.
 - Default stage-2 recipe should jointly fine-tune the decoder tail with `--decoder-train-mode last_n` and keep `--decoder-train-last-n 2` unless a run explicitly overrides it.
 - Default stage-2 batch size should be `128` unless a run explicitly overrides it.
+- Default comparison runs should use `--eval-every 16` unless a run explicitly overrides it, to avoid paying full validation cost every epoch.
+- Default training should enable AMP unless a run explicitly overrides it with `--no-amp`.
 - For long runs, prefer `--no-save-epoch-checkpoints` and keep only `best.pth` / `last.pth` plus logs and exported CSV/JSON/PNG artifacts to avoid filling `/root/autodl-tmp`.
 - For comparison experiments, always record both stage train curves and val curves, and include at least `loss`, `CD-L2`, `F1@1%`, and `IOU`. Include `EMD` when runtime permits.

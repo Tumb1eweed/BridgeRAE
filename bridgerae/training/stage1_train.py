@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import sys
 import time
 from pathlib import Path
@@ -27,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--train-split-set', type=str, default='ShapeNet-34')
     parser.add_argument('--val-split-set', type=str, default='ShapeNet-34')
     parser.add_argument('--class-id', type=str, default=None)
-    parser.add_argument('--batch-size', type=int, default=256)
+    parser.add_argument('--batch-size', type=int, default=384)
     parser.add_argument('--val-batch-size', type=int, default=None)
     parser.add_argument('--num-workers', type=int, default=8)
     parser.add_argument('--epochs', type=int, default=20)
@@ -42,20 +43,63 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--resume-ckpt', type=Path, default=None)
     parser.add_argument('--max-steps', type=int, default=None)
     parser.add_argument('--max-val-batches', type=int, default=50)
-    parser.add_argument('--amp', action='store_true')
+    parser.add_argument('--amp', action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument('--iou-resolution', type=int, default=32)
     parser.add_argument('--metric-points', type=int, default=2048)
     parser.add_argument('--eval-every', type=int, default=5)
     parser.add_argument('--latent-normalize', action='store_true', help='Enable channel-wise latent normalization')
     parser.add_argument('--latent-noise-std', type=float, default=0.1, help='Noise std added to normalized latent during training (0 = disabled)')
     parser.add_argument('--latent-stats-batches', type=int, default=None, help='Max batches for stats collection (None = full pass)')
+    parser.add_argument('--latent-stats-cache-dir', type=Path, default=Path('/root/autodl-tmp/projects/BridgeRAE/outputs/latent_stats_cache'))
     parser.add_argument('--repulsion-weight', type=float, default=0.0, help='Weight for repulsion loss (0 = disabled)')
     parser.add_argument('--repulsion-k', type=int, default=8, help='Number of nearest neighbors for repulsion loss')
     parser.add_argument('--lr-scheduler', type=str, default='cosine', choices=['none', 'cosine'], help='LR scheduler type')
     parser.add_argument('--warmup-epochs', type=int, default=5, help='Linear warmup epochs before cosine decay')
     parser.add_argument('--lr-min', type=float, default=1e-6, help='Minimum LR for cosine scheduler')
     parser.add_argument('--save-epoch-checkpoints', action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument('--compile', action=argparse.BooleanOptionalAction, default=False, help='Use torch.compile for encoder/decoder')
     return parser.parse_args()
+
+
+def _slugify(value: str) -> str:
+    return re.sub(r'[^A-Za-z0-9._-]+', '_', value)
+
+
+def build_latent_stats_cache_path(args: argparse.Namespace) -> Path:
+    class_id = args.class_id or 'all'
+    encoder_name = _slugify(args.encoder_ckpt.stem)
+    split_set = _slugify(args.train_split_set)
+    return args.latent_stats_cache_dir / (
+        f'{args.dataset}_class-{class_id}_split-{split_set}_'
+        f'complete-{args.num_complete_points}_encoder-{encoder_name}.pth'
+    )
+
+
+def try_load_latent_stats_cache(path: Path, normalizer: LatentNormalizer) -> bool:
+    if not path.exists():
+        return False
+    payload = torch.load(path, map_location='cpu')
+    state_dict = payload.get('normalizer') if isinstance(payload, dict) else None
+    if not isinstance(state_dict, dict):
+        return False
+    normalizer.load_state_dict(state_dict)
+    return normalizer.is_collected
+
+
+def save_latent_stats_cache(path: Path, args: argparse.Namespace, normalizer: LatentNormalizer) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        'normalizer': normalizer.state_dict(),
+        'meta': {
+            'dataset': args.dataset,
+            'data_root': str(args.data_root) if args.data_root is not None else None,
+            'class_id': args.class_id or 'all',
+            'train_split_set': args.train_split_set,
+            'num_complete_points': args.num_complete_points,
+            'encoder_ckpt': str(args.encoder_ckpt),
+        },
+    }
+    torch.save(payload, path)
 
 
 def save_checkpoint(path: Path, epoch: int, step: int, decoder: QueryCompletionDecoder, optimizer: torch.optim.Optimizer, args: argparse.Namespace, metrics: dict[str, float], normalizer: LatentNormalizer | None = None) -> None:
@@ -219,18 +263,33 @@ def main() -> None:
     if args.resume_ckpt is not None:
         start_epoch, global_step, best_val_loss = load_resume_checkpoint(args.resume_ckpt, decoder, optimizer, normalizer)
 
+    if args.compile:
+        encoder = torch.compile(encoder)
+        decoder = torch.compile(decoder)
+
     if normalizer is not None and not normalizer.is_collected:
-        stats_loader = build_loader(
-            args, split='train', split_set=args.train_split_set,
-            shuffle=False, batch_size=args.batch_size, max_samples=args.max_train_samples,
-        )
-        normalizer.collect_stats(encoder, stats_loader, device, max_batches=args.latent_stats_batches)
-        del stats_loader
-        print(json.dumps({
-            'latent_stats': 'collected',
-            'mean_norm': float(normalizer.mean.norm().item()),
-            'std_mean': float(normalizer.std.mean().item()),
-        }), flush=True)
+        cache_path = build_latent_stats_cache_path(args)
+        if try_load_latent_stats_cache(cache_path, normalizer):
+            print(json.dumps({
+                'latent_stats': 'loaded_from_cache',
+                'cache_path': str(cache_path),
+                'mean_norm': float(normalizer.mean.norm().item()),
+                'std_mean': float(normalizer.std.mean().item()),
+            }), flush=True)
+        else:
+            stats_loader = build_loader(
+                args, split='train', split_set=args.train_split_set,
+                shuffle=False, batch_size=args.batch_size, max_samples=args.max_train_samples,
+            )
+            normalizer.collect_stats(encoder, stats_loader, device, max_batches=args.latent_stats_batches)
+            del stats_loader
+            save_latent_stats_cache(cache_path, args, normalizer)
+            print(json.dumps({
+                'latent_stats': 'collected',
+                'cache_path': str(cache_path),
+                'mean_norm': float(normalizer.mean.norm().item()),
+                'std_mean': float(normalizer.std.mean().item()),
+            }), flush=True)
 
     total_target_epoch = start_epoch + args.epochs
 

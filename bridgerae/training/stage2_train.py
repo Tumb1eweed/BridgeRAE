@@ -39,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--weight-decay', type=float, default=5e-2)
     parser.add_argument('--log-every', type=int, default=25)
     parser.add_argument('--save-dir', type=Path, default=Path('/root/autodl-tmp/projects/BridgeRAE/outputs/stage2'))
-    parser.add_argument('--amp', action='store_true')
+    parser.add_argument('--amp', action=argparse.BooleanOptionalAction, default=True)
 
     parser.add_argument('--latent-noise-std', type=float, default=0.01)
     parser.add_argument('--latent-noise-start', type=float, default=0.0)
@@ -67,6 +67,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--warmup-epochs', type=int, default=5, help='Linear warmup epochs before cosine decay')
     parser.add_argument('--lr-min', type=float, default=1e-6, help='Minimum LR for cosine scheduler')
     parser.add_argument('--save-epoch-checkpoints', action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument('--compile', action=argparse.BooleanOptionalAction, default=False, help='Use torch.compile for encoder/decoder/transport')
     return parser.parse_args()
 
 
@@ -313,6 +314,11 @@ def main() -> None:
     best_val = float('inf')
     if args.resume_ckpt is not None:
         start_epoch, global_step, best_val = load_transport_resume_checkpoint(args.resume_ckpt, decoder, transport, optimizer)
+
+    if args.compile:
+        encoder = torch.compile(encoder)
+        decoder = torch.compile(decoder)
+        transport = torch.compile(transport)
 
     total_target_epoch = start_epoch + args.epochs
 
