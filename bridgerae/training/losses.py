@@ -55,7 +55,7 @@ def chamfer_distance_l2(pred: torch.Tensor, target: torch.Tensor) -> torch.Tenso
 def chamfer_distance_l1(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     if _CHAMFER_AVAILABLE and pred.is_cuda and target.is_cuda:
         dist1_sq, dist2_sq = _chamfer_extension_distances(pred, target)
-        return 0.5 * (dist1_sq.clamp_min(0.0).sqrt().mean() + dist2_sq.clamp_min(0.0).sqrt().mean())
+        return 0.5 * (dist1_sq.clamp_min(1e-12).sqrt().mean() + dist2_sq.clamp_min(1e-12).sqrt().mean())
 
     dist = torch.cdist(pred, target, p=2)
     pred_to_target = dist.min(dim=2)[0]

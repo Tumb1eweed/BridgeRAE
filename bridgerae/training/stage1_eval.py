@@ -43,7 +43,15 @@ def load_decoder(checkpoint_path: Path, device: torch.device, output_points: int
         output_points=output_points,
         refine=refine,
     ).to(device)
-    decoder.load_state_dict(checkpoint['decoder'])
+    decoder_state = dict(checkpoint['decoder'])
+    if 'query_embed' not in decoder_state and 'query_tokens' in decoder_state:
+        if 'query_pos' in decoder_state and decoder_state['query_pos'].shape == decoder_state['query_tokens'].shape:
+            decoder_state['query_embed'] = decoder_state['query_tokens'] + decoder_state['query_pos']
+        else:
+            decoder_state['query_embed'] = decoder_state['query_tokens']
+        decoder_state.pop('query_tokens', None)
+        decoder_state.pop('query_pos', None)
+    decoder.load_state_dict(decoder_state, strict=False)
     decoder.eval()
     normalizer: LatentNormalizer | None = None
     if 'normalizer' in checkpoint:
