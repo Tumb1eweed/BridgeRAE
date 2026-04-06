@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 
 from bridgerae.datasets import build_pointcloud_dataset, resolve_point_counts, shapenet_point_collate_fn
 from bridgerae.models import LatentNormalizer, PointMAEEncoder, QueryCompletionDecoder
-from bridgerae.training.losses import chamfer_distance_l2
+from bridgerae.training.losses import chamfer_distance_l1
 from bridgerae.training.metrics import compute_completion_metrics
 
 
@@ -36,12 +36,14 @@ def parse_args() -> argparse.Namespace:
 
 def load_decoder_state(checkpoint_path: Path, device: torch.device, output_points: int) -> tuple[QueryCompletionDecoder, LatentNormalizer | None, dict]:
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    refine = checkpoint.get('args', {}).get('refine', False)
     decoder = QueryCompletionDecoder(
         hidden_dim=384,
         num_queries=256,
         num_heads=6,
         depth=6,
         output_points=output_points,
+        refine=refine,
     ).to(device)
     decoder.load_state_dict(checkpoint['decoder'])
     decoder.eval()
@@ -82,7 +84,7 @@ def evaluate_checkpoint(
             if normalizer is not None:
                 tokens = normalizer.normalize(tokens)
             pred = decoder(tokens, enc.centers).coarse_points
-            loss = chamfer_distance_l2(pred, complete_points)
+            loss = chamfer_distance_l1(pred, complete_points)
             metrics = compute_completion_metrics(pred, complete_points, iou_resolution=iou_resolution, metric_points=metric_points)
             totals['eval_loss'] += float(loss.item())
             totals['eval_chamfer_distance'] += metrics['chamfer_distance']

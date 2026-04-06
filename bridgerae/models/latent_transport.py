@@ -38,21 +38,38 @@ class TimeEmbedding(nn.Module):
         return self.mlp(emb)
 
 
+class AdaLN(nn.Module):
+    """Adaptive Layer Normalization conditioned on a per-sample vector."""
+
+    def __init__(self, dim: int) -> None:
+        super().__init__()
+        self.norm = nn.LayerNorm(dim, elementwise_affine=False)
+        self.proj = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(dim, dim * 2),
+        )
+
+    def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        # x: (B, N, D), cond: (B, D)
+        scale, shift = self.proj(cond).unsqueeze(1).chunk(2, dim=-1)
+        return self.norm(x) * (1 + scale) + shift
+
+
 class LatentTransportBlock(nn.Module):
     def __init__(self, dim: int, num_heads: int, mlp_ratio: float = 4.0, drop: float = 0.0) -> None:
         super().__init__()
-        self.self_norm = nn.LayerNorm(dim)
+        self.self_norm = AdaLN(dim)
         self.self_attn = SelfAttention(dim, num_heads=num_heads, proj_drop=drop)
-        self.cross_norm_q = nn.LayerNorm(dim)
+        self.cross_norm_q = AdaLN(dim)
         self.cross_norm_ctx = nn.LayerNorm(dim)
         self.cross_attn = CrossAttention(dim, num_heads=num_heads, proj_drop=drop)
-        self.mlp_norm = nn.LayerNorm(dim)
+        self.mlp_norm = AdaLN(dim)
         self.mlp = Mlp(dim, mlp_ratio=mlp_ratio, drop=drop)
 
-    def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
-        x = x + self.self_attn(self.self_norm(x))
-        x = x + self.cross_attn(self.cross_norm_q(x), self.cross_norm_ctx(cond))
-        x = x + self.mlp(self.mlp_norm(x))
+    def forward(self, x: torch.Tensor, cond: torch.Tensor, time_cond: torch.Tensor) -> torch.Tensor:
+        x = x + self.self_attn(self.self_norm(x, time_cond))
+        x = x + self.cross_attn(self.cross_norm_q(x, time_cond), self.cross_norm_ctx(cond))
+        x = x + self.mlp(self.mlp_norm(x, time_cond))
         return x
 
 
@@ -79,7 +96,7 @@ class LatentTransportModel(nn.Module):
             LatentTransportBlock(dim=hidden_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, drop=drop)
             for _ in range(depth)
         ])
-        self.norm = nn.LayerNorm(hidden_dim)
+        self.norm = AdaLN(hidden_dim)
         self.velocity_head = nn.Linear(hidden_dim, hidden_dim)
         self._init_weights()
 
@@ -90,11 +107,18 @@ class LatentTransportModel(nn.Module):
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
             elif isinstance(module, nn.LayerNorm):
-                nn.init.constant_(module.bias, 0)
-                nn.init.constant_(module.weight, 1.0)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+                if module.weight is not None:
+                    nn.init.constant_(module.weight, 1.0)
         # Zero-init velocity head so transport starts as identity (v≈0)
         nn.init.zeros_(self.velocity_head.weight)
         nn.init.zeros_(self.velocity_head.bias)
+        # Zero-init AdaLN projections so modulation starts as standard LN
+        for module in self.modules():
+            if isinstance(module, AdaLN):
+                nn.init.zeros_(module.proj[-1].weight)
+                nn.init.zeros_(module.proj[-1].bias)
 
     def forward(
         self,
@@ -103,13 +127,13 @@ class LatentTransportModel(nn.Module):
         centers: torch.Tensor,
         time_steps: torch.Tensor,
     ) -> LatentTransportOutput:
-        time_embed = self.time_embed(time_steps).unsqueeze(1)
+        time_cond = self.time_embed(time_steps)  # (B, D)
         center_embed = self.center_pos_embed(centers)
-        x = self.input_proj(state_tokens) + time_embed + center_embed
+        x = self.input_proj(state_tokens) + center_embed
         cond = self.cond_proj(source_tokens) + center_embed
         for block in self.blocks:
-            x = block(x, cond)
-        velocity = self.velocity_head(self.norm(x))
+            x = block(x, cond, time_cond)
+        velocity = self.velocity_head(self.norm(x, time_cond))
         transported_tokens = state_tokens + velocity
         return LatentTransportOutput(velocity=velocity, transported_tokens=transported_tokens)
 

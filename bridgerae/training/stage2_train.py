@@ -13,7 +13,7 @@ from tqdm.auto import tqdm
 
 from bridgerae.datasets import build_pointcloud_dataset, resolve_point_counts, shapenet_point_collate_fn
 from bridgerae.models import LatentNormalizer, LatentTransportModel, PointMAEEncoder, QueryCompletionDecoder
-from bridgerae.training.losses import chamfer_distance_l2, get_chamfer_backend
+from bridgerae.training.losses import chamfer_distance_l1, chamfer_distance_l2, get_chamfer_backend
 from bridgerae.training.metrics import compute_completion_metrics
 
 
@@ -105,12 +105,14 @@ def build_loader(
 
 def load_frozen_decoder(checkpoint_path: Path, device: torch.device, output_points: int) -> tuple[QueryCompletionDecoder, LatentNormalizer | None]:
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    refine = checkpoint.get('args', {}).get('refine', False)
     decoder = QueryCompletionDecoder(
         hidden_dim=384,
         num_queries=256,
         num_heads=6,
         depth=6,
         output_points=output_points,
+        refine=refine,
     ).to(device)
     decoder.load_state_dict(checkpoint['decoder'])
     decoder.eval()
@@ -154,12 +156,20 @@ def configure_decoder_training(
     for p in decoder.norm.parameters():
         p.requires_grad = True
 
-    decoder.point_head.train()
-    for p in decoder.point_head.parameters():
-        p.requires_grad = True
+    if hasattr(decoder, 'point_head'):
+        decoder.point_head.train()
+        for p in decoder.point_head.parameters():
+            p.requires_grad = True
+    if hasattr(decoder, 'seed_head'):
+        decoder.seed_head.train()
+        for p in decoder.seed_head.parameters():
+            p.requires_grad = True
+    if hasattr(decoder, 'refine_module'):
+        decoder.refine_module.train()
+        for p in decoder.refine_module.parameters():
+            p.requires_grad = True
 
-    decoder.query_tokens.requires_grad = True
-    decoder.query_pos.requires_grad = True
+    decoder.query_embed.requires_grad = True
     return [p for p in decoder.parameters() if p.requires_grad]
 
 
@@ -239,7 +249,7 @@ def evaluate(
             pred_tokens = transport.transport(src_tokens, src.centers, num_steps=transport_steps)
             pred_tokens_dec = normalizer.denormalize(pred_tokens) if normalizer is not None else pred_tokens
             pred_points = decoder(pred_tokens_dec, src.centers).coarse_points
-            recon_loss = chamfer_distance_l2(pred_points, complete_points)
+            recon_loss = chamfer_distance_l1(pred_points, complete_points)
             metrics = compute_completion_metrics(
                 pred_points,
                 complete_points,
@@ -393,7 +403,7 @@ def main() -> None:
                 pred_tokens = transport.transport_train(src_tokens, src.centers, num_steps=args.transport_steps)
                 pred_tokens_dec = normalizer.denormalize(pred_tokens) if normalizer is not None else pred_tokens
                 pred_points = decoder(pred_tokens_dec, src.centers).coarse_points
-                recon_loss = chamfer_distance_l2(pred_points, complete_points)
+                recon_loss = chamfer_distance_l1(pred_points, complete_points)
                 loss = flow_weight * flow_loss + args.recon_weight * recon_loss
 
             scaler.scale(loss).backward()

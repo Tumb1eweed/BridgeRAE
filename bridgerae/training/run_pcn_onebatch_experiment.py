@@ -38,6 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--skip-stage1', action='store_true')
     parser.add_argument('--skip-stage2', action='store_true')
     parser.add_argument('--stage1-ckpt', type=Path, default=None)
+    parser.add_argument('--stage1-resume-ckpt', type=Path, default=None)
     return parser.parse_args()
 
 
@@ -45,7 +46,7 @@ def _run_and_log(command: list[str], log_path: Path) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env.setdefault('PYTHONUNBUFFERED', '1')
-    with log_path.open('w', encoding='utf-8') as handle:
+    with log_path.open('w', encoding='utf-8', buffering=1) as handle:
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -57,7 +58,9 @@ def _run_and_log(command: list[str], log_path: Path) -> None:
         assert process.stdout is not None
         for line in process.stdout:
             sys.stdout.write(line)
+            sys.stdout.flush()
             handle.write(line)
+            handle.flush()
         return_code = process.wait()
     if return_code != 0:
         raise subprocess.CalledProcessError(return_code, command)
@@ -101,13 +104,14 @@ def _plot_curves(stage1_rows: list[dict[str, Any]], stage2_rows: list[dict[str, 
         print(json.dumps({'warning': 'plot_skipped', 'reason': str(exc)}), flush=True)
         return
 
-    fig, axes = plt.subplots(2, 3, figsize=(17, 10))
+    fig, axes = plt.subplots(2, 4, figsize=(21, 10))
 
     if stage1_rows:
         stage1_epochs = [int(row['epoch']) + 1 for row in stage1_rows]
         axes[0, 0].plot(stage1_epochs, [row.get('train_loss', float('nan')) for row in stage1_rows], label='stage1 train_loss')
         axes[0, 0].plot(stage1_epochs, [row.get('val_loss', float('nan')) for row in stage1_rows], label='stage1 val_loss')
         axes[0, 1].plot(stage1_epochs, [row.get('val_chamfer_distance', float('nan')) for row in stage1_rows], label='stage1 val CD-L2')
+        axes[0, 2].plot(stage1_epochs, [row.get('val_chamfer_distance_l1', float('nan')) for row in stage1_rows], label='stage1 val CD-L1')
         axes[1, 0].plot(stage1_epochs, [row.get('val_emd', float('nan')) for row in stage1_rows], label='stage1 val EMD')
         axes[1, 1].plot(stage1_epochs, [row.get('val_f1_1pct', float('nan')) for row in stage1_rows], label='stage1 val F1@1%')
         axes[1, 2].plot(stage1_epochs, [row.get('val_iou', float('nan')) for row in stage1_rows], label='stage1 val IOU')
@@ -117,12 +121,14 @@ def _plot_curves(stage1_rows: list[dict[str, Any]], stage2_rows: list[dict[str, 
         axes[0, 0].plot(stage2_epochs, [row.get('train_total_loss', float('nan')) for row in stage2_rows], label='stage2 train_total')
         axes[0, 0].plot(stage2_epochs, [row.get('val_recon_loss', float('nan')) for row in stage2_rows], label='stage2 val_recon')
         axes[0, 1].plot(stage2_epochs, [row.get('val_chamfer_distance', float('nan')) for row in stage2_rows], label='stage2 val CD-L2')
+        axes[0, 2].plot(stage2_epochs, [row.get('val_chamfer_distance_l1', float('nan')) for row in stage2_rows], label='stage2 val CD-L1')
         axes[1, 0].plot(stage2_epochs, [row.get('val_emd', float('nan')) for row in stage2_rows], label='stage2 val EMD')
         axes[1, 1].plot(stage2_epochs, [row.get('val_f1_1pct', float('nan')) for row in stage2_rows], label='stage2 val F1@1%')
         axes[1, 2].plot(stage2_epochs, [row.get('val_iou', float('nan')) for row in stage2_rows], label='stage2 val IOU')
 
-    axes[0, 2].axis('off')
-    titles = ['Loss', 'Val CD-L2', '', 'Val EMD', 'Val F1@1%', 'Val IOU']
+    axes[0, 3].axis('off')
+    axes[1, 3].axis('off')
+    titles = ['Loss', 'Val CD-L2', 'Val CD-L1', '', 'Val EMD', 'Val F1@1%', 'Val IOU', '']
     for ax, title in zip(axes.flat, titles):
         if title:
             ax.set_title(title)
@@ -172,6 +178,8 @@ def _build_stage1_command(args: argparse.Namespace, stage1_dir: Path) -> list[st
         command.extend(['--max-train-samples', str(args.max_train_samples)])
     if args.max_val_samples is not None:
         command.extend(['--max-val-samples', str(args.max_val_samples)])
+    if args.stage1_resume_ckpt is not None:
+        command.extend(['--resume-ckpt', str(args.stage1_resume_ckpt)])
     if args.latent_normalize:
         command.append('--latent-normalize')
     if args.latent_noise_std > 0:
@@ -252,23 +260,27 @@ def main() -> None:
         'epochs': args.epochs,
         'stage1_final_val_loss': _final_metric(stage1_rows, 'val_loss'),
         'stage1_final_val_cd_l2': _final_metric(stage1_rows, 'val_chamfer_distance'),
+        'stage1_final_val_cd_l1': _final_metric(stage1_rows, 'val_chamfer_distance_l1'),
         'stage1_final_val_emd': _final_metric(stage1_rows, 'val_emd'),
         'stage1_final_val_f1_1pct': _final_metric(stage1_rows, 'val_f1_1pct'),
         'stage1_final_val_iou': _final_metric(stage1_rows, 'val_iou'),
         'stage1_best_val_loss': _best_metric(stage1_rows, 'val_loss', mode='min'),
         'stage1_best_val_cd_l2': _best_metric(stage1_rows, 'val_chamfer_distance', mode='min'),
+        'stage1_best_val_cd_l1': _best_metric(stage1_rows, 'val_chamfer_distance_l1', mode='min'),
         'stage1_best_val_emd': _best_metric(stage1_rows, 'val_emd', mode='min'),
         'stage1_best_val_f1_1pct': _best_metric(stage1_rows, 'val_f1_1pct', mode='max'),
         'stage1_best_val_iou': _best_metric(stage1_rows, 'val_iou', mode='max'),
         'stage2_final_val_total_loss': _final_metric(stage2_rows, 'val_total_loss'),
         'stage2_final_val_recon_loss': _final_metric(stage2_rows, 'val_recon_loss'),
         'stage2_final_val_cd_l2': _final_metric(stage2_rows, 'val_chamfer_distance'),
+        'stage2_final_val_cd_l1': _final_metric(stage2_rows, 'val_chamfer_distance_l1'),
         'stage2_final_val_emd': _final_metric(stage2_rows, 'val_emd'),
         'stage2_final_val_f1_1pct': _final_metric(stage2_rows, 'val_f1_1pct'),
         'stage2_final_val_iou': _final_metric(stage2_rows, 'val_iou'),
         'stage2_best_val_total_loss': _best_metric(stage2_rows, 'val_total_loss', mode='min'),
         'stage2_best_val_recon_loss': _best_metric(stage2_rows, 'val_recon_loss', mode='min'),
         'stage2_best_val_cd_l2': _best_metric(stage2_rows, 'val_chamfer_distance', mode='min'),
+        'stage2_best_val_cd_l1': _best_metric(stage2_rows, 'val_chamfer_distance_l1', mode='min'),
         'stage2_best_val_emd': _best_metric(stage2_rows, 'val_emd', mode='min'),
         'stage2_best_val_f1_1pct': _best_metric(stage2_rows, 'val_f1_1pct', mode='max'),
         'stage2_best_val_iou': _best_metric(stage2_rows, 'val_iou', mode='max'),

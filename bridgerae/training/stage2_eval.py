@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 
 from bridgerae.datasets import build_pointcloud_dataset, resolve_point_counts, shapenet_point_collate_fn
 from bridgerae.models import LatentNormalizer, LatentTransportModel, PointMAEEncoder, QueryCompletionDecoder
-from bridgerae.training.losses import chamfer_distance_l2
+from bridgerae.training.losses import chamfer_distance_l1
 from bridgerae.training.metrics import compute_completion_metrics
 
 
@@ -35,13 +35,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _build_decoder(device: torch.device, output_points: int) -> QueryCompletionDecoder:
+def _build_decoder(device: torch.device, output_points: int, refine: bool = False) -> QueryCompletionDecoder:
     return QueryCompletionDecoder(
         hidden_dim=384,
         num_queries=256,
         num_heads=6,
         depth=6,
         output_points=output_points,
+        refine=refine,
     ).to(device)
 
 
@@ -57,7 +58,9 @@ def load_transport_and_decoder(
     transport.load_state_dict(stage2_checkpoint['transport'])
     transport.eval()
 
-    decoder = _build_decoder(device, output_points)
+    decoder_state = stage2_checkpoint.get('decoder', {})
+    refine = 'seed_head.weight' in decoder_state
+    decoder = _build_decoder(device, output_points, refine=refine)
     decoder_source = 'stage2'
     normalizer: LatentNormalizer | None = None
     if 'decoder' in stage2_checkpoint:
@@ -72,6 +75,9 @@ def load_transport_and_decoder(
                 'No decoder found in stage2 checkpoint. Please provide --stage1-ckpt for fallback decoder loading.'
             )
         stage1_checkpoint = torch.load(stage1_checkpoint_path, map_location='cpu')
+        s1_refine = stage1_checkpoint.get('args', {}).get('refine', False)
+        if s1_refine != refine:
+            decoder = _build_decoder(device, output_points, refine=s1_refine)
         decoder.load_state_dict(stage1_checkpoint['decoder'])
         decoder_source = 'stage1'
         if 'normalizer' in stage1_checkpoint:
@@ -155,7 +161,7 @@ def main() -> None:
             pred_tokens = transport.transport(src_tokens, src.centers, num_steps=args.transport_steps)
             pred_tokens_dec = normalizer.denormalize(pred_tokens) if normalizer is not None else pred_tokens
             pred_points = decoder(pred_tokens_dec, src.centers).coarse_points
-            loss = chamfer_distance_l2(pred_points, complete_points)
+            loss = chamfer_distance_l1(pred_points, complete_points)
             metrics = compute_completion_metrics(pred_points, complete_points, iou_resolution=args.iou_resolution, metric_points=args.metric_points)
             totals['loss'] += float(loss.item())
             for key in ('chamfer_distance', 'chamfer_distance_l1', 'emd', 'f1_1pct', 'iou'):

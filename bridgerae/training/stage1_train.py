@@ -14,7 +14,7 @@ from tqdm.auto import tqdm
 
 from bridgerae.datasets import build_pointcloud_dataset, resolve_point_counts, shapenet_point_collate_fn
 from bridgerae.models import LatentNormalizer, PointMAEEncoder, QueryCompletionDecoder
-from bridgerae.training.losses import chamfer_distance_l2, get_chamfer_backend, repulsion_loss
+from bridgerae.training.losses import chamfer_distance_l1, chamfer_distance_l2, get_chamfer_backend, repulsion_loss
 from bridgerae.training.metrics import compute_completion_metrics
 
 
@@ -58,6 +58,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--lr-min', type=float, default=1e-6, help='Minimum LR for cosine scheduler')
     parser.add_argument('--save-epoch-checkpoints', action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument('--compile', action=argparse.BooleanOptionalAction, default=False, help='Use torch.compile for encoder/decoder')
+    parser.add_argument('--refine', action='store_true', help='Use coarse-to-fine decoder with seed points + folding refinement')
+    parser.add_argument('--seed-loss-weight', type=float, default=0.5, help='Weight for seed Chamfer loss (only effective with --refine)')
     return parser.parse_args()
 
 
@@ -196,7 +198,7 @@ def evaluate(
             if normalizer is not None:
                 tokens = normalizer.normalize(tokens)
             pred = decoder(tokens, enc.centers).coarse_points
-            loss = chamfer_distance_l2(pred, complete_points)
+            loss = chamfer_distance_l1(pred, complete_points)
             metrics = compute_completion_metrics(pred, complete_points, iou_resolution=iou_resolution, metric_points=metric_points)
             totals['val_loss'] += float(loss.item())
             totals['val_chamfer_distance'] += metrics['chamfer_distance']
@@ -250,6 +252,7 @@ def main() -> None:
         num_heads=6,
         depth=6,
         output_points=args.num_complete_points,
+        refine=args.refine,
     ).to(device)
     normalizer: LatentNormalizer | None = None
     if args.latent_normalize:
@@ -361,8 +364,11 @@ def main() -> None:
             optimizer.zero_grad(set_to_none=True)
             with torch.amp.autocast('cuda', enabled=args.amp):
                 dec = decoder(tokens, enc.centers)
-                cd_loss = chamfer_distance_l2(dec.coarse_points, complete_points)
+                cd_loss = chamfer_distance_l1(dec.coarse_points, complete_points)
                 loss = cd_loss
+                if dec.seed_points is not None and args.seed_loss_weight > 0:
+                    seed_loss = chamfer_distance_l1(dec.seed_points, complete_points)
+                    loss = loss + args.seed_loss_weight * seed_loss
                 if args.repulsion_weight > 0:
                     rep_loss = repulsion_loss(dec.coarse_points, k=args.repulsion_k)
                     loss = loss + args.repulsion_weight * rep_loss

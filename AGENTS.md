@@ -58,5 +58,7 @@
 - Default stage-2 batch size should be `128` unless a run explicitly overrides it.
 - Default comparison runs should use `--eval-every 16` unless a run explicitly overrides it, to avoid paying full validation cost every epoch.
 - Default training should enable AMP unless a run explicitly overrides it with `--no-amp`.
+- Default long-running training and resume workflows should be launched via `bridgerae.training.run_pcn_onebatch_experiment` instead of calling `stage1_train.py` or `stage2_train.py` directly, so stdout is tee'd into `stage1.log` / `stage2.log` and progress can be monitored reliably.
+- When resuming stage-1 through the runner, prefer `--skip-stage2 --stage1-resume-ckpt <last_or_best_ckpt>` rather than launching `stage1_train.py` directly.
 - For long runs, prefer `--no-save-epoch-checkpoints` and keep only `best.pth` / `last.pth` plus logs and exported CSV/JSON/PNG artifacts to avoid filling `/root/autodl-tmp`.
-- For comparison experiments, always record both stage train curves and val curves, and include at least `loss`, `CD-L2`, `F1@1%`, and `IOU`. Include `EMD` when runtime permits.
+- For comparison experiments, always record both stage train curves and val curves, and include at least `loss`, `CD-L2`, `CD-L1`, `F1@1%`, and `IOU`. Include `EMD` when runtime permits.

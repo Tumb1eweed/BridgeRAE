@@ -34,12 +34,14 @@ def parse_args() -> argparse.Namespace:
 
 def load_decoder(checkpoint_path: Path, device: torch.device, output_points: int) -> tuple[QueryCompletionDecoder, LatentNormalizer | None]:
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    refine = checkpoint.get('args', {}).get('refine', False)
     decoder = QueryCompletionDecoder(
         hidden_dim=384,
         num_queries=256,
         num_heads=6,
         depth=6,
         output_points=output_points,
+        refine=refine,
     ).to(device)
     decoder.load_state_dict(checkpoint['decoder'])
     decoder.eval()
@@ -88,6 +90,7 @@ def main() -> None:
 
     totals = {
         'chamfer_distance': 0.0,
+        'chamfer_distance_l1': 0.0,
         'emd': 0.0,
         'f1_1pct': 0.0,
         'iou': 0.0,

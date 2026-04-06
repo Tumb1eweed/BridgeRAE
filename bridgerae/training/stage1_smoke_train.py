@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader, Subset
 
 from bridgerae.datasets import build_pointcloud_dataset, resolve_point_counts, shapenet_point_collate_fn
 from bridgerae.models import PointMAEEncoder, QueryCompletionDecoder
-from bridgerae.training.losses import chamfer_distance_l2
+from bridgerae.training.losses import chamfer_distance_l1
 
 
 def parse_args() -> argparse.Namespace:
@@ -79,7 +79,7 @@ def main() -> None:
             with torch.no_grad():
                 enc = encoder(complete_points)
             dec = decoder(enc.tokens, enc.centers)
-            loss = chamfer_distance_l2(dec.coarse_points, complete_points)
+            loss = chamfer_distance_l1(dec.coarse_points, complete_points)
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()

@@ -44,23 +44,23 @@ def _chamfer_extension_distances(pred: torch.Tensor, target: torch.Tensor) -> tu
 def chamfer_distance_l2(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     if _CHAMFER_AVAILABLE and pred.is_cuda and target.is_cuda:
         dist1_sq, dist2_sq = _chamfer_extension_distances(pred, target)
-        return dist1_sq.clamp_min(0.0).sqrt().mean() + dist2_sq.clamp_min(0.0).sqrt().mean()
-
-    dist = torch.cdist(pred, target, p=2)
-    pred_to_target = dist.min(dim=2)[0]
-    target_to_pred = dist.min(dim=1)[0]
-    return pred_to_target.mean() + target_to_pred.mean()
-
-
-def chamfer_distance_l1(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    if _CHAMFER_AVAILABLE and pred.is_cuda and target.is_cuda:
-        dist1_sq, dist2_sq = _chamfer_extension_distances(pred, target)
         return 0.5 * (dist1_sq.clamp_min(0.0).mean() + dist2_sq.clamp_min(0.0).mean())
 
     dist = torch.cdist(pred, target, p=2)
     pred_to_target = dist.min(dim=2)[0]
     target_to_pred = dist.min(dim=1)[0]
     return 0.5 * (pred_to_target.pow(2).mean() + target_to_pred.pow(2).mean())
+
+
+def chamfer_distance_l1(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    if _CHAMFER_AVAILABLE and pred.is_cuda and target.is_cuda:
+        dist1_sq, dist2_sq = _chamfer_extension_distances(pred, target)
+        return 0.5 * (dist1_sq.clamp_min(0.0).sqrt().mean() + dist2_sq.clamp_min(0.0).sqrt().mean())
+
+    dist = torch.cdist(pred, target, p=2)
+    pred_to_target = dist.min(dim=2)[0]
+    target_to_pred = dist.min(dim=1)[0]
+    return 0.5 * (pred_to_target.mean() + target_to_pred.mean())
 
 
 def get_chamfer_backend(device: torch.device | None = None) -> str:
