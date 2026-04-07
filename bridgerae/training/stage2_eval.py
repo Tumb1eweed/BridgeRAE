@@ -35,14 +35,13 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _build_decoder(device: torch.device, output_points: int, refine: bool = False) -> QueryCompletionDecoder:
+def _build_decoder(device: torch.device, output_points: int) -> QueryCompletionDecoder:
     return QueryCompletionDecoder(
         hidden_dim=384,
         num_queries=256,
         num_heads=6,
         depth=6,
         output_points=output_points,
-        refine=refine,
     ).to(device)
 
 
@@ -58,9 +57,7 @@ def load_transport_and_decoder(
     transport.load_state_dict(stage2_checkpoint['transport'])
     transport.eval()
 
-    decoder_state = stage2_checkpoint.get('decoder', {})
-    refine = 'seed_head.weight' in decoder_state
-    decoder = _build_decoder(device, output_points, refine=refine)
+    decoder = _build_decoder(device, output_points)
     decoder_source = 'stage2'
     normalizer: LatentNormalizer | None = None
     if 'decoder' in stage2_checkpoint:
@@ -73,11 +70,8 @@ def load_transport_and_decoder(
         if stage1_checkpoint_path is None:
             raise ValueError(
                 'No decoder found in stage2 checkpoint. Please provide --stage1-ckpt for fallback decoder loading.'
-            )
+        )
         stage1_checkpoint = torch.load(stage1_checkpoint_path, map_location='cpu')
-        s1_refine = stage1_checkpoint.get('args', {}).get('refine', False)
-        if s1_refine != refine:
-            decoder = _build_decoder(device, output_points, refine=s1_refine)
         decoder.load_state_dict(stage1_checkpoint['decoder'])
         decoder_source = 'stage1'
         if 'normalizer' in stage1_checkpoint:

@@ -72,14 +72,12 @@ def parse_args() -> argparse.Namespace:
 
 def load_frozen_decoder(checkpoint_path: Path, device: torch.device, output_points: int) -> tuple[QueryCompletionDecoder, LatentNormalizer | None]:
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
-    refine = checkpoint.get('args', {}).get('refine', False)
     decoder = QueryCompletionDecoder(
         hidden_dim=384,
         num_queries=256,
         num_heads=6,
         depth=6,
         output_points=output_points,
-        refine=refine,
     ).to(device)
     decoder.load_state_dict(checkpoint['decoder'])
     decoder.eval()
@@ -126,14 +124,6 @@ def configure_decoder_training(
     if hasattr(decoder, 'point_head'):
         decoder.point_head.train()
         for p in decoder.point_head.parameters():
-            p.requires_grad = True
-    if hasattr(decoder, 'seed_head'):
-        decoder.seed_head.train()
-        for p in decoder.seed_head.parameters():
-            p.requires_grad = True
-    if hasattr(decoder, 'refine_module'):
-        decoder.refine_module.train()
-        for p in decoder.refine_module.parameters():
             p.requires_grad = True
 
     decoder.query_embed.requires_grad = True

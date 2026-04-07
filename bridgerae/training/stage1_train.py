@@ -57,8 +57,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--lr-min', type=float, default=1e-6, help='Minimum LR for cosine scheduler')
     parser.add_argument('--save-epoch-checkpoints', action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument('--compile', action=argparse.BooleanOptionalAction, default=False, help='Use torch.compile for encoder/decoder')
-    parser.add_argument('--refine', action='store_true', help='Use coarse-to-fine decoder with seed points + folding refinement')
-    parser.add_argument('--seed-loss-weight', type=float, default=0.5, help='Weight for seed Chamfer loss (only effective with --refine)')
     return parser.parse_args()
 
 
@@ -159,8 +157,9 @@ def evaluate(
 
     with torch.no_grad():
         for batch in loader:
+            partial_points = batch['partial_points'].to(device, non_blocking=True)
             complete_points = batch['complete_points'].to(device, non_blocking=True)
-            enc = encoder(complete_points)
+            enc = encoder(partial_points)
             tokens = enc.tokens
             if normalizer is not None:
                 tokens = normalizer.normalize(tokens)
@@ -219,7 +218,6 @@ def main() -> None:
         num_heads=6,
         depth=6,
         output_points=args.num_complete_points,
-        refine=args.refine,
     ).to(device)
     normalizer: LatentNormalizer | None = None
     if args.latent_normalize:
@@ -282,6 +280,9 @@ def main() -> None:
         'dataset': args.dataset,
         'num_input_points': args.num_input_points,
         'num_complete_points': args.num_complete_points,
+        'train_input_points': 'complete_points',
+        'val_input_points': 'partial_points',
+        'val_target_points': 'complete_points',
         'train_split_set': args.train_split_set,
         'val_split_set': args.val_split_set,
         'max_train_samples': args.max_train_samples,
@@ -331,9 +332,6 @@ def main() -> None:
                 dec = decoder(tokens, enc.centers)
                 cd_loss = chamfer_distance_l1(dec.coarse_points, complete_points)
                 loss = cd_loss
-                if dec.seed_points is not None and args.seed_loss_weight > 0:
-                    seed_loss = chamfer_distance_l1(dec.seed_points, complete_points)
-                    loss = loss + args.seed_loss_weight * seed_loss
                 if args.repulsion_weight > 0:
                     rep_loss = repulsion_loss(dec.coarse_points, k=args.repulsion_k)
                     loss = loss + args.repulsion_weight * rep_loss

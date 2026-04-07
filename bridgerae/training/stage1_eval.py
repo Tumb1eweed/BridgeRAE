@@ -34,14 +34,12 @@ def parse_args() -> argparse.Namespace:
 
 def load_decoder(checkpoint_path: Path, device: torch.device, output_points: int) -> tuple[QueryCompletionDecoder, LatentNormalizer | None]:
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
-    refine = checkpoint.get('args', {}).get('refine', False)
     decoder = QueryCompletionDecoder(
         hidden_dim=384,
         num_queries=256,
         num_heads=6,
         depth=6,
         output_points=output_points,
-        refine=refine,
     ).to(device)
     decoder_state = dict(checkpoint['decoder'])
     if 'query_embed' not in decoder_state and 'query_tokens' in decoder_state:
@@ -107,8 +105,9 @@ def main() -> None:
 
     with torch.no_grad():
         for batch_idx, batch in enumerate(loader):
+            partial_points = batch['partial_points'].to(device, non_blocking=True)
             complete_points = batch['complete_points'].to(device, non_blocking=True)
-            enc = encoder(complete_points)
+            enc = encoder(partial_points)
             tokens = enc.tokens
             if normalizer is not None:
                 tokens = normalizer.normalize(tokens)
@@ -128,6 +127,8 @@ def main() -> None:
         'dataset': args.dataset,
         'num_input_points': args.num_input_points,
         'num_complete_points': args.num_complete_points,
+        'input_points': 'partial_points',
+        'target_points': 'complete_points',
         'split': args.split,
         'split_set': args.split_set,
         'class_id': args.class_id or 'all',

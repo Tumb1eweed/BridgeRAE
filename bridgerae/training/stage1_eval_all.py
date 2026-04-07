@@ -36,14 +36,12 @@ def parse_args() -> argparse.Namespace:
 
 def load_decoder_state(checkpoint_path: Path, device: torch.device, output_points: int) -> tuple[QueryCompletionDecoder, LatentNormalizer | None, dict]:
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
-    refine = checkpoint.get('args', {}).get('refine', False)
     decoder = QueryCompletionDecoder(
         hidden_dim=384,
         num_queries=256,
         num_heads=6,
         depth=6,
         output_points=output_points,
-        refine=refine,
     ).to(device)
     decoder.load_state_dict(checkpoint['decoder'])
     decoder.eval()
@@ -78,8 +76,9 @@ def evaluate_checkpoint(
 
     with torch.no_grad():
         for batch in loader:
+            partial_points = batch['partial_points'].to(device, non_blocking=True)
             complete_points = batch['complete_points'].to(device, non_blocking=True)
-            enc = encoder(complete_points)
+            enc = encoder(partial_points)
             tokens = enc.tokens
             if normalizer is not None:
                 tokens = normalizer.normalize(tokens)
@@ -103,6 +102,8 @@ def evaluate_checkpoint(
         'epoch': epoch,
         'step': step,
         **averaged,
+        'input_points': 'partial_points',
+        'target_points': 'complete_points',
         'checkpoint': str(checkpoint_path),
     }
 

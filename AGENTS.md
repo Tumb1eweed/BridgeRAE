@@ -40,7 +40,7 @@
 - **Stage-1 (autoencoder):** `complete → encoder → normalize → (noise) → decoder → complete`. Decoder learns to reconstruct complete shapes from complete latent tokens. Encoder is frozen (Point-MAE pretrained); only decoder is trainable.
 - **Stage-2 (transport):** `partial → encoder → normalize → transport → denormalize → decoder → complete`. Transport model learns to map partial latent to complete latent space. Decoder receives the same distribution it was trained on.
 - Latent stats are collected over **complete** point clouds (not partial) to match the decoder's operating space.
-- Stage-1 does NOT use partial points at all; the paired partial data is only used in stage-2.
+- Stage-1 training does NOT use partial points. Stage-1 validation/eval uses `partial_points` as encoder input and `complete_points` as the target, so its val metrics measure direct partial-to-complete decoding without the stage-2 transport.
 
 ## Latent Normalization & Noise Augmentation
 
@@ -62,9 +62,7 @@
 
 - **LR Scheduler:** Both stages support `--lr-scheduler cosine` (default) with `--warmup-epochs` (default 5) and `--lr-min` (default 1e-6). Use `--lr-scheduler none` for constant LR.
 - **Repulsion Loss:** Stage-1 supports `--repulsion-weight` (default 0) and `--repulsion-k` (default 8) to penalize point clustering.
-- **Coarse-to-Fine Decoder:** Stage-1 supports `--refine` to enable seed-point + folding-grid refinement, with `--seed-loss-weight` (default 0.5) for seed Chamfer supervision. Stage-2 and eval scripts auto-detect refine mode from checkpoints.
-- **Addressing Point Clustering:** Use `--repulsion-weight 0.01 --repulsion-k 8` in stage-1 to push apart over-concentrated points (e.g. fuselage sides).
-- **Addressing Missing Fine Detail:** Use `--refine --seed-loss-weight 0.5` in stage-1 so the decoder first places seed points on thin structures (tail fins, pylons) then expands local patches around them.
+- **Addressing Point Clustering:** `--repulsion-weight 0.01 --repulsion-k 8` is available for stage-1 ablations, but do not enable repulsion in the default PCN recipe.
 
 ## Default Training Recipe
 

@@ -12,7 +12,6 @@ from timm.models.layers import trunc_normal_
 class CompletionDecoderOutput:
     query_tokens: torch.Tensor
     coarse_points: torch.Tensor
-    seed_points: torch.Tensor | None = None
 
 
 class CrossAttention(nn.Module):
@@ -95,29 +94,6 @@ class QueryDecoderBlock(nn.Module):
         return query
 
 
-class PointRefinement(nn.Module):
-    """Refine seed points into dense local patches using a learnable folding grid."""
-
-    def __init__(self, hidden_dim: int, points_per_query: int, grid_dim: int = 2) -> None:
-        super().__init__()
-        self.points_per_query = points_per_query
-        self.grid = nn.Parameter(torch.randn(1, points_per_query, grid_dim) * 0.1)
-        self.mlp = nn.Sequential(
-            nn.Linear(hidden_dim + grid_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, 3),
-        )
-
-    def forward(self, query_features: torch.Tensor, seed_points: torch.Tensor) -> torch.Tensor:
-        B, Q, D = query_features.shape
-        P = self.points_per_query
-        feat = query_features.unsqueeze(2).expand(B, Q, P, D)
-        grid = self.grid.expand(B, Q, -1, -1)
-        offsets = self.mlp(torch.cat([feat, grid], dim=-1))
-        seeds = seed_points.unsqueeze(2).expand(B, Q, P, 3)
-        return (seeds + offsets).reshape(B, Q * P, 3)
-
-
 class QueryCompletionDecoder(nn.Module):
     def __init__(
         self,
@@ -127,7 +103,6 @@ class QueryCompletionDecoder(nn.Module):
         depth: int = 6,
         mlp_ratio: float = 4.0,
         output_points: int = 8192,
-        refine: bool = False,
     ) -> None:
         super().__init__()
         if output_points % num_queries != 0:
@@ -136,7 +111,6 @@ class QueryCompletionDecoder(nn.Module):
         self.num_queries = num_queries
         self.output_points = output_points
         self.points_per_query = output_points // num_queries
-        self.refine = refine
 
         self.query_embed = nn.Parameter(torch.zeros(1, num_queries, hidden_dim))
         self.center_pos_embed = nn.Sequential(
@@ -149,15 +123,11 @@ class QueryCompletionDecoder(nn.Module):
             for _ in range(depth)
         ])
         self.norm = nn.LayerNorm(hidden_dim)
-        if refine:
-            self.seed_head = nn.Linear(hidden_dim, 3)
-            self.refine_module = PointRefinement(hidden_dim, self.points_per_query)
-        else:
-            self.point_head = nn.Sequential(
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.GELU(),
-                nn.Linear(hidden_dim, self.points_per_query * 3),
-            )
+        self.point_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, self.points_per_query * 3),
+        )
         self._init_weights()
 
     def _init_weights(self) -> None:
@@ -170,9 +140,6 @@ class QueryCompletionDecoder(nn.Module):
             elif isinstance(module, nn.LayerNorm):
                 nn.init.constant_(module.bias, 0)
                 nn.init.constant_(module.weight, 1.0)
-        if self.refine:
-            nn.init.zeros_(self.refine_module.mlp[-1].weight)
-            nn.init.zeros_(self.refine_module.mlp[-1].bias)
 
     def forward(self, encoder_tokens: torch.Tensor, encoder_centers: torch.Tensor) -> CompletionDecoderOutput:
         batch_size = encoder_tokens.shape[0]
@@ -181,9 +148,5 @@ class QueryCompletionDecoder(nn.Module):
         for block in self.blocks:
             query = block(query, context)
         query = self.norm(query)
-        if self.refine:
-            seed_points = self.seed_head(query)
-            coarse_points = self.refine_module(query, seed_points)
-            return CompletionDecoderOutput(query_tokens=query, coarse_points=coarse_points, seed_points=seed_points)
         coarse_points = self.point_head(query).reshape(batch_size, self.output_points, 3)
         return CompletionDecoderOutput(query_tokens=query, coarse_points=coarse_points)

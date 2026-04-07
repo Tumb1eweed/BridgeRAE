@@ -31,8 +31,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--latent-normalize', action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument('--latent-noise-std', type=float, default=0.1)
     parser.add_argument('--latent-stats-cache-dir', type=Path, default=Path('/root/autodl-tmp/projects/BridgeRAE/outputs/latent_stats_cache'))
-    parser.add_argument('--refine', action='store_true')
-    parser.add_argument('--seed-loss-weight', type=float, default=0.5)
     parser.add_argument('--repulsion-weight', type=float, default=0.0)
     parser.add_argument('--repulsion-k', type=int, default=8)
     parser.add_argument('--decoder-train-mode', type=str, default='last_n', choices=['none', 'last_n', 'all'])
@@ -189,9 +187,6 @@ def _build_stage1_command(args: argparse.Namespace, stage1_dir: Path) -> list[st
     if args.latent_noise_std > 0:
         command.extend(['--latent-noise-std', str(args.latent_noise_std)])
     command.extend(['--latent-stats-cache-dir', str(args.latent_stats_cache_dir)])
-    if args.refine:
-        command.append('--refine')
-        command.extend(['--seed-loss-weight', str(args.seed_loss_weight)])
     if args.repulsion_weight > 0:
         command.extend(['--repulsion-weight', str(args.repulsion_weight)])
     command.extend(['--repulsion-k', str(args.repulsion_k)])
