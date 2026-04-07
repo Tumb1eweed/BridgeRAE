@@ -9,16 +9,31 @@
 
 ## Dataset
 
-- Expected dataset root: `/root/autodl-tmp/datasets/ShapeNet55_PoinTrPairs`.
-- Training data layout: `train/complete/<taxonomy_id>/<model_id>.npy` paired with `train/partial/<taxonomy_id>/<model_id>/<view_id>.npy`.
-- Test data layout mirrors the same structure under `test/`.
+- Supported dataset roots:
+  - ShapeNet55 PoinTrPairs: `/root/autodl-tmp/datasets/ShapeNet55_PoinTrPairs`
+  - PCN: `/root/autodl-tmp/datasets/PCN`
+- ShapeNet55 PoinTrPairs layout:
+  - training: `train/complete/<taxonomy_id>/<model_id>.npy` paired with `train/partial/<taxonomy_id>/<model_id>/<view_id>.npy`
+  - test: mirrors the same structure under `test/`
+- PCN layout:
+  - `train/complete/<taxonomy_id>/<model_id>.npy`
+  - `train/partial/<taxonomy_id>/<model_id>/<view_id>.npy`
+  - `val/complete/<taxonomy_id>/<model_id>.npy`
+  - `val/partial/<taxonomy_id>/<model_id>/<view_id>.npy`
+  - `test/complete/<taxonomy_id>/<model_id>.npy`
+  - `test/partial/<taxonomy_id>/<model_id>/<view_id>.npy`
 - Each partial view file is treated as an independent sample.
+- Common PCN taxonomy ids used in experiments so far:
+  - `02691156` = airplane
+  - `03001627` = chair
 
 ## Defaults
 
 - Default input points: `2048`
 - Default complete points: `8192`
 - Default behavior trains on all categories unless `--class-id` is provided.
+- For `dataset=pcn`, the default complete point count resolves to `16384` unless explicitly overridden.
+- For `dataset=pcn`, long runs often use class-specific training with `--class-id <taxonomy_id>`.
 
 ## Two-Stage Training Architecture
 
@@ -47,10 +62,16 @@
 
 - **LR Scheduler:** Both stages support `--lr-scheduler cosine` (default) with `--warmup-epochs` (default 5) and `--lr-min` (default 1e-6). Use `--lr-scheduler none` for constant LR.
 - **Repulsion Loss:** Stage-1 supports `--repulsion-weight` (default 0) and `--repulsion-k` (default 8) to penalize point clustering.
+- **Coarse-to-Fine Decoder:** Stage-1 supports `--refine` to enable seed-point + folding-grid refinement, with `--seed-loss-weight` (default 0.5) for seed Chamfer supervision. Stage-2 and eval scripts auto-detect refine mode from checkpoints.
+- **Addressing Point Clustering:** Use `--repulsion-weight 0.01 --repulsion-k 8` in stage-1 to push apart over-concentrated points (e.g. fuselage sides).
+- **Addressing Missing Fine Detail:** Use `--refine --seed-loss-weight 0.5` in stage-1 so the decoder first places seed points on thin structures (tail fins, pylons) then expands local patches around them.
 
 ## Default Training Recipe
 
+- Default repository commands for training/eval should run inside the `bridgerae` conda environment, preferably via `conda run -n bridgerae ...`, unless a run explicitly requires a different environment.
 - Default PCN recipe should use `--latent-normalize` for stage-1.
+- Default PCN stage-1/stage-2 validation metrics should keep `metric_points=2048` unless a run explicitly requests full-point evaluation.
+- If a run explicitly requests full-point validation metrics on PCN, use `metric_points=16384` and be conservative with validation batch size; the current measured safe upper bound for `stage1_eval` on `02691156` is `batch_size=8`, while `9+` is unstable.
 - Default stage-1 batch size should be `384` unless a run explicitly overrides it.
 - Default stage-1 recipe should use latent noise augmentation with `--latent-noise-std 0.1`.
 - Default transport recipe should use the zero-init transport head in `bridgerae/models/latent_transport.py`, so stage-2 starts close to identity and learns residual corrections.

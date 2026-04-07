@@ -70,7 +70,6 @@ BridgeRAE/
 │       ├── stage1_train.py
 │       ├── stage1_eval.py
 │       ├── stage1_eval_all.py
-│       ├── stage1_smoke_train.py
 │       ├── stage2_train.py
 │       ├── stage2_eval.py
 │       ├── losses.py

@@ -2,20 +2,19 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import re
 import sys
 import time
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader, Subset
 from tqdm.auto import tqdm
 
-from bridgerae.datasets import build_pointcloud_dataset, resolve_point_counts, shapenet_point_collate_fn
+from bridgerae.datasets import resolve_point_counts
 from bridgerae.models import LatentNormalizer, PointMAEEncoder, QueryCompletionDecoder
-from bridgerae.training.losses import chamfer_distance_l1, chamfer_distance_l2, get_chamfer_backend, repulsion_loss
+from bridgerae.training.losses import chamfer_distance_l1, get_chamfer_backend, repulsion_loss
 from bridgerae.training.metrics import compute_completion_metrics
+from bridgerae.training.utils import build_cosine_lr_scheduler, build_loader
 
 
 def parse_args() -> argparse.Namespace:
@@ -135,38 +134,6 @@ def load_resume_checkpoint(
     metrics = checkpoint.get('metrics', {}) or {}
     best_val_loss = float(metrics.get('val_loss', float('inf')))
     return start_epoch, global_step, best_val_loss
-
-
-def build_loader(
-    args: argparse.Namespace,
-    split: str,
-    split_set: str,
-    shuffle: bool,
-    batch_size: int,
-    max_samples: int | None = None,
-) -> DataLoader:
-    dataset = build_pointcloud_dataset(
-        dataset_name=args.dataset,
-        data_root=args.data_root,
-        split=split,
-        class_id=args.class_id,
-        num_input_points=args.num_input_points,
-        num_complete_points=args.num_complete_points,
-        split_set=split_set,
-        pair_data_root=args.pair_data_root,
-    )
-    if max_samples is not None:
-        dataset = Subset(dataset, range(min(max_samples, len(dataset))))
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=args.num_workers,
-        collate_fn=shapenet_point_collate_fn,
-        pin_memory=True,
-        drop_last=False,
-        persistent_workers=args.num_workers > 0,
-    )
 
 
 def evaluate(
@@ -298,13 +265,11 @@ def main() -> None:
 
     scheduler = None
     if args.lr_scheduler == 'cosine':
-        def lr_lambda(epoch_idx: int) -> float:
-            if epoch_idx < args.warmup_epochs:
-                return max((epoch_idx + 1) / max(args.warmup_epochs, 1), args.lr_min / args.lr)
-            progress = (epoch_idx - args.warmup_epochs) / max(total_target_epoch - args.warmup_epochs, 1)
-            cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
-            return max(cosine, args.lr_min / args.lr)
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch=start_epoch - 1 if start_epoch > 0 else -1)
+        scheduler = build_cosine_lr_scheduler(
+            optimizer, total_target_epoch, args.warmup_epochs,
+            args.lr, args.lr_min,
+            last_epoch=start_epoch - 1 if start_epoch > 0 else -1,
+        )
 
     meta = {
         'train_size': len(train_loader.dataset),

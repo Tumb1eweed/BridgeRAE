@@ -12,6 +12,29 @@ from torch.utils.data import Dataset
 _VALID_SPLITS = {"train", "val", "test"}
 
 
+def sample_fixed_size(points: torch.Tensor, count: int) -> torch.Tensor:
+    """Sample or pad a point cloud to exactly *count* points."""
+    if points.shape[0] == count:
+        return points
+    if points.shape[0] > count:
+        perm = torch.randperm(points.shape[0])[:count]
+        return points[perm]
+    extra = torch.randint(0, points.shape[0], (count - points.shape[0],))
+    return torch.cat([points, points[extra]], dim=0)
+
+
+def normalize_pair(
+    partial_points: torch.Tensor,
+    complete_points: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Centroid-normalize a partial/complete pair using the complete centroid."""
+    centroid = complete_points.mean(dim=0, keepdim=True)
+    complete_centered = complete_points - centroid
+    partial_centered = partial_points - centroid
+    scale = complete_centered.norm(dim=1).max().clamp_min(1e-6)
+    return partial_centered / scale, complete_centered / scale
+
+
 @dataclass(frozen=True)
 class ShapeNetPointCloudSample:
     scan_id: str
@@ -213,27 +236,6 @@ class ShapeNetPointCloudDataset(Dataset[ShapeNetPointCloudSample]):
             raise ValueError(f'Expected Nx3 point cloud at {path}, got shape {points.shape}')
         return torch.from_numpy(points[:, :3]).float()
 
-    @staticmethod
-    def _sample_fixed_size(points: torch.Tensor, count: int) -> torch.Tensor:
-        if points.shape[0] == count:
-            return points
-        if points.shape[0] > count:
-            perm = torch.randperm(points.shape[0])[:count]
-            return points[perm]
-        extra = torch.randint(0, points.shape[0], (count - points.shape[0],))
-        return torch.cat([points, points[extra]], dim=0)
-
-    @staticmethod
-    def _normalize_pair(
-        partial_points: torch.Tensor,
-        complete_points: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        centroid = complete_points.mean(dim=0, keepdim=True)
-        complete_centered = complete_points - centroid
-        partial_centered = partial_points - centroid
-        scale = complete_centered.norm(dim=1).max().clamp_min(1e-6)
-        return partial_centered / scale, complete_centered / scale
-
     def __len__(self) -> int:
         return len(self.samples)
 
@@ -242,11 +244,11 @@ class ShapeNetPointCloudDataset(Dataset[ShapeNetPointCloudSample]):
         partial_points = self._load_points(sample['partial_path'])
         complete_points = self._load_points(sample['complete_path'])
 
-        partial_points = self._sample_fixed_size(partial_points, self.num_input_points)
-        complete_points = self._sample_fixed_size(complete_points, self.num_complete_points)
+        partial_points = sample_fixed_size(partial_points, self.num_input_points)
+        complete_points = sample_fixed_size(complete_points, self.num_complete_points)
 
         if self.normalize_pair:
-            partial_points, complete_points = self._normalize_pair(partial_points, complete_points)
+            partial_points, complete_points = normalize_pair(partial_points, complete_points)
         if self.input_transform is not None:
             partial_points = self.input_transform(partial_points)
         if self.target_transform is not None:

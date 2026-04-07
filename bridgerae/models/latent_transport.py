@@ -137,13 +137,13 @@ class LatentTransportModel(nn.Module):
         transported_tokens = state_tokens + velocity
         return LatentTransportOutput(velocity=velocity, transported_tokens=transported_tokens)
 
-    def transport_train(
+    def _euler_integrate(
         self,
         source_tokens: torch.Tensor,
         centers: torch.Tensor,
         num_steps: int = 8,
     ) -> torch.Tensor:
-        """Euler integration with gradients for training."""
+        """Euler integration core shared by train and inference paths."""
         z = source_tokens
         dt = 1.0 / float(num_steps)
         for step in range(num_steps):
@@ -157,6 +157,15 @@ class LatentTransportModel(nn.Module):
             z = z + dt * velocity
         return z
 
+    def transport_train(
+        self,
+        source_tokens: torch.Tensor,
+        centers: torch.Tensor,
+        num_steps: int = 8,
+    ) -> torch.Tensor:
+        """Euler integration with gradients for training."""
+        return self._euler_integrate(source_tokens, centers, num_steps)
+
     @torch.no_grad()
     def transport(
         self,
@@ -164,10 +173,5 @@ class LatentTransportModel(nn.Module):
         centers: torch.Tensor,
         num_steps: int = 8,
     ) -> torch.Tensor:
-        z = source_tokens
-        dt = 1.0 / float(num_steps)
-        for step in range(num_steps):
-            t = torch.full((source_tokens.shape[0],), step / float(num_steps), device=source_tokens.device, dtype=source_tokens.dtype)
-            velocity = self(z, source_tokens, centers, t).velocity
-            z = z + dt * velocity
-        return z
+        """Euler integration without gradients for inference."""
+        return self._euler_integrate(source_tokens, centers, num_steps)

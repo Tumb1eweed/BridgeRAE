@@ -9,6 +9,8 @@ from .pcn_pairs import PCNPointCloudDataset
 from .shapenet_pairs import (
     ShapeNetPointCloudDataset,
     ShapeNetPointCloudSample,
+    normalize_pair,
+    sample_fixed_size,
     shapenet_point_collate_fn,
 )
 
@@ -21,5 +23,7 @@ __all__ = [
     'PCNPointCloudDataset',
     'ShapeNetPointCloudDataset',
     'ShapeNetPointCloudSample',
+    'normalize_pair',
+    'sample_fixed_size',
     'shapenet_point_collate_fn',
 ]

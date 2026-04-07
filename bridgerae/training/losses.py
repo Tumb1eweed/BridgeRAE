@@ -5,6 +5,11 @@ from pathlib import Path
 
 import torch
 
+try:
+    from knn_cuda import KNN
+except Exception:  # pragma: no cover
+    KNN = None
+
 
 _CHAMFER_IMPORT_ERROR: Exception | None = None
 _CHAMFER_AVAILABLE = False
@@ -71,7 +76,7 @@ def get_chamfer_backend(device: torch.device | None = None) -> str:
     return 'chamfer_extension' if _CHAMFER_AVAILABLE else 'torch_cdist_fallback'
 
 
-def repulsion_loss(pred: torch.Tensor, k: int = 8, eps: float = 1e-6) -> torch.Tensor:
+def repulsion_loss(pred: torch.Tensor, k: int = 8, eps: float = 1e-6, chunk_size: int = 64) -> torch.Tensor:
     """Penalize nearby points to encourage uniform distribution.
 
     For each point, computes the mean negative squared distance to its k nearest
@@ -81,16 +86,38 @@ def repulsion_loss(pred: torch.Tensor, k: int = 8, eps: float = 1e-6) -> torch.T
         pred: (B, N, 3) predicted point cloud.
         k: number of nearest neighbors.
         eps: small constant for numerical stability.
+        chunk_size: query chunk size for fallback KNN computation.
     """
-    # (B, N, N) pairwise squared distances
-    diff = pred.unsqueeze(2) - pred.unsqueeze(1)  # (B, N, N, 3)
-    dist_sq = (diff * diff).sum(dim=-1)            # (B, N, N)
-    # exclude self (diagonal) by setting to large value
-    diag_mask = torch.eye(pred.shape[1], device=pred.device, dtype=torch.bool).unsqueeze(0)
-    dist_sq = dist_sq.masked_fill(diag_mask, float('inf'))
-    # k nearest neighbors
-    knn_sq, _ = dist_sq.topk(k, dim=-1, largest=False)  # (B, N, k)
-    # weight: closer neighbors get stronger penalty  h(r) = max(0, eps - r)
-    knn_dist = knn_sq.clamp_min(0).sqrt()  # (B, N, k)
-    penalty = (-knn_dist).exp()  # exponential repulsion
+    batch_size, num_points, _ = pred.shape
+    if num_points <= 1:
+        return pred.new_tensor(0.0)
+
+    neighbor_count = min(k + 1, num_points)
+    search_points = pred.detach()
+    batch_idx = torch.arange(batch_size, device=pred.device).view(batch_size, 1, 1)
+
+    if KNN is not None and pred.is_cuda:
+        _, idx = KNN(k=neighbor_count, transpose_mode=True)(search_points, search_points)
+        neighbors = pred[batch_idx, idx]
+        knn_dist = (neighbors - pred.unsqueeze(2)).pow(2).sum(dim=-1).clamp_min(0.0).sqrt()
+        if neighbor_count > k:
+            knn_dist = knn_dist[:, :, 1:]
+        else:
+            knn_dist = knn_dist[:, :, :k]
+    else:
+        knn_chunks: list[torch.Tensor] = []
+        arange_all = torch.arange(num_points, device=pred.device)
+        for start in range(0, num_points, chunk_size):
+            end = min(start + chunk_size, num_points)
+            chunk = search_points[:, start:end, :]
+            dist = torch.cdist(chunk, search_points, p=2)
+            diag_idx = arange_all[start:end] - start
+            dist[:, diag_idx, arange_all[start:end]] = float('inf')
+            knn_chunks.append(dist.topk(min(k, num_points - 1), dim=-1, largest=False).indices)
+        idx = torch.cat(knn_chunks, dim=1)
+        neighbors = pred[batch_idx, idx]
+        knn_dist = (neighbors - pred.unsqueeze(2)).pow(2).sum(dim=-1).clamp_min(0.0).sqrt()
+
+    # closer neighbors get stronger penalty
+    penalty = (-knn_dist.clamp_min(eps)).exp()
     return penalty.mean()
